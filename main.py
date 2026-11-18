@@ -21,6 +21,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     ChatMemberHandler,
+    ChatJoinRequestHandler,
     filters,
     ContextTypes
 )
@@ -114,7 +115,7 @@ DATA_FILE = "bot_data.json"
 
 
 def load_data():
-    global giveaways, all_users, channel_history, required_channels
+    global giveaways, all_users, channel_history, required_channels, join_requests
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
@@ -123,6 +124,11 @@ def load_data():
             all_users = data.get("all_users", {})
             channel_history = data.get("channel_history", {})
             required_channels = data.get("required_channels", [])
+            # Pending join requests for mandatory channels: {chat_id(str): set(user_id)}
+            join_requests = {
+                str(k): set(int(x) for x in v)
+                for k, v in data.get("join_requests", {}).items()
+            }
             # Restore runtime-only sets and integer user IDs after JSON load.
             for _gid, _g in giveaways.items():
                 _g["users"] = {int(k): v for k, v in _g.get("users", {}).items()}
@@ -136,12 +142,14 @@ def load_data():
             all_users = {}
             channel_history = {}
             required_channels = []
+            join_requests = {}
     except Exception as e:
         logger.error(f"Error loading: {e}")
         giveaways = {}
         all_users = {}
         channel_history = {}
         required_channels = []
+        join_requests = {}
 
 
 def save_data():
@@ -151,6 +159,7 @@ def save_data():
             "all_users": all_users,
             "channel_history": channel_history,
             "required_channels": required_channels,
+            "join_requests": join_requests,
             "last_saved": datetime.now().isoformat()
         }
 
@@ -243,6 +252,7 @@ user_sessions = {}
 admin_sessions = {}
 channel_history = {}
 required_channels = []   # mandatory join channels (owner managed)
+join_requests = {}       # pending join requests for mandatory channels {chat_id(str): set(user_id)}
 
 # ================= SECURITY / ANTI-ABUSE =================
 SECURITY_ENABLED = True
@@ -421,6 +431,11 @@ def is_member_status(member):
     return False
 
 
+def has_pending_request(chat_id, user_id):
+    """True if the user has sent a join request to this (mandatory) channel."""
+    return int(user_id) in join_requests.get(str(chat_id), set())
+
+
 async def check_membership(bot, chat_id, user_id):
     """True = member, False = not a member, None = could not check (bot problem)."""
     try:
@@ -433,6 +448,7 @@ async def check_membership(bot, chat_id, user_id):
 
 async def get_missing_channels(bot, user_id):
     """Mandatory channels the user has NOT joined. Owner is exempt.
+    A pending join request (request-link channels) counts as joined.
     If the bot cannot check a channel (removed/not admin) it is skipped so nobody gets locked out."""
     if is_owner(user_id):
         return []
@@ -440,8 +456,24 @@ async def get_missing_channels(bot, user_id):
     for ch in required_channels:
         result = await check_membership(bot, ch["chat_id"], user_id)
         if result is False:
+            # Not a member - but did they send a join request?
+            if has_pending_request(ch["chat_id"], user_id):
+                continue
             missing.append(ch)
     return missing
+
+
+async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Records join requests sent to mandatory channels (request-to-join invite links)."""
+    req = update.chat_join_request
+    if not req:
+        return
+    chat_id = req.chat.id
+    if chat_id not in {c["chat_id"] for c in required_channels}:
+        return
+    join_requests.setdefault(str(chat_id), set()).add(req.from_user.id)
+    save_data()
+    logger.info(f"Join request recorded: user {req.from_user.id} -> chat {chat_id}")
 
 
 async def send_force_join_prompt(context, user_id, missing, giveaway_id=None, query=None):
@@ -565,7 +597,12 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
     required_ids = {c["chat_id"] for c in required_channels}
 
     if chat_id in required_ids:
-        scope = None            # left a mandatory channel -> remove votes in ALL active giveaways
+        # Left a mandatory channel -> forget any stored join request too
+        pending = join_requests.get(str(chat_id))
+        if pending and user.id in pending:
+            pending.discard(user.id)
+            save_data()
+        scope = None            # remove votes in ALL active giveaways
     elif any(g.get("channel_id") == chat_id and not g.get("ended") for g in giveaways.values()):
         scope = chat_id         # left a giveaway channel -> remove votes in that channel's giveaways
     else:
@@ -1481,6 +1518,7 @@ async def removejoin_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     for ch in list(required_channels):
         if str(ch["chat_id"]) == ident or str(ch.get("identifier", "")).lower() == ident:
             required_channels.remove(ch)
+            join_requests.pop(str(ch["chat_id"]), None)
             save_data()
             await update.message.reply_text(f"✅ Removed: {esc(ch.get('title'))}", parse_mode="HTML")
             return
@@ -2148,6 +2186,9 @@ def main():
     # Detect users leaving channels -> deduct votes
     app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
 
+    # Detect join requests sent to mandatory channels (request-to-join links)
+    app.add_handler(ChatJoinRequestHandler(join_request_handler))
+
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
@@ -2163,8 +2204,8 @@ def main():
     print("   /addjoin, /removejoin, /joinlist - mandatory channels")
     print("=" * 60)
 
-    # chat_member is required so the bot can see users leaving channels
-    app.run_polling(allowed_updates=["message", "callback_query", "chat_member"])
+    # chat_member: see users leaving channels | chat_join_request: see join requests
+    app.run_polling(allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
 
 
 if __name__ == "__main__":
