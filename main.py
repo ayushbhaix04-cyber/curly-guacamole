@@ -33,8 +33,8 @@ if not TOKEN:
     raise SystemExit("BOT_TOKEN environment variable is not set.")
 
 BOT_NAME = "ARJUN VOTE"
-BOT_USERNAME = os.getenv("BOT_USERNAME", "Brokenvotebot")   # change to your new bot's username
-OWNER_ID = int(os.getenv("OWNER_ID", "8703047687"))
+BOT_USERNAME = os.getenv("BOT_USERNAME", "arjunvotebot")   # change to your new bot's username
+OWNER_ID = int(os.getenv("OWNER_ID", "8413435583"))
 
 # ================= PREMIUM EMOJIS =================
 EMOJI_VOTE = "5267095979097610740"
