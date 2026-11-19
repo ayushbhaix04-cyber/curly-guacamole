@@ -135,6 +135,11 @@ def load_data():
                 _g["vote_counts"] = {int(k): int(v) for k, v in _g.get("vote_counts", {}).items()}
                 _g["voted_users"] = {int(k): set(v) for k, v in _g.get("voted_users", {}).items()}
                 _g["vote_msgs"] = {int(k): v for k, v in _g.get("vote_msgs", {}).items()}
+                # New fields (safe defaults for old data)
+                _g["mode"] = _g.get("mode", "manual")
+                _g["pending"] = {int(k): v for k, v in _g.get("pending", {}).items()}
+                _g["rejected"] = [int(x) for x in _g.get("rejected", [])]
+                _g["vote_log"] = _g.get("vote_log", [])
             logger.info(f"Loaded: {len(giveaways)} giveaways, {len(all_users)} users, "
                         f"{len(required_channels)} required channels")
         else:
@@ -383,6 +388,11 @@ def is_owner(user_id):
     return user_id == OWNER_ID
 
 
+def is_manager(user_id, giveaway):
+    """Creator of the giveaway or the bot owner."""
+    return user_id == giveaway.get("creator") or is_owner(user_id)
+
+
 async def send_notification_to_owner(context, title, message):
     try:
         await context.bot.send_message(
@@ -394,15 +404,14 @@ async def send_notification_to_owner(context, title, message):
         logger.error(f"Failed to send: {e}")
 
 
-# ================= PARTICIPANT POST KEYBOARD (2 BUTTONS) =================
-def vote_keyboard(giveaway_id, user_id, votes):
-    """Every participant post in the channel has 2 buttons:
-    1) current votes (shows a popup)   2) VOTE NOW (opens the bot via deep link)."""
+# ================= PARTICIPANT POST (2 BUTTONS) =================
+def participant_markup(giveaway_id, user_id, votes):
+    """Two buttons under every participant: [current votes] [vote now -> opens the bot]."""
+    vote_link = f"https://t.me/{BOT_USERNAME}?start=v_{giveaway_id}_{user_id}"
     return InlineKeyboardMarkup([[
-        premium_button(f"Votes - {votes}", callback_data=f"cnt_{giveaway_id}_{user_id}",
+        premium_button(f"Votes: {votes}", callback_data=f"vinfo_{giveaway_id}_{user_id}",
                        emoji_id=EMOJI_CHART, style=BUTTON_STYLE_PRIMARY),
-        premium_button("VOTE NOW", url=f"https://t.me/{BOT_USERNAME}?start=v_{giveaway_id}_{user_id}",
-                       emoji_id=EMOJI_VOTE, style=BUTTON_STYLE_SUCCESS)
+        premium_button("Vote Now", url=vote_link, emoji_id=EMOJI_VOTE, style=BUTTON_STYLE_SUCCESS)
     ]])
 
 
@@ -419,7 +428,7 @@ async def update_vote_button_in_channel(context, giveaway_id, user_id, new_votes
             await context.bot.edit_message_reply_markup(
                 chat_id=giveaway['channel_id'],
                 message_id=message_id,
-                reply_markup=vote_keyboard(giveaway_id, user_id, new_votes)
+                reply_markup=participant_markup(giveaway_id, user_id, new_votes)
             )
             return True
         except Exception as e:
@@ -464,7 +473,6 @@ async def get_missing_channels(bot, user_id):
     for ch in required_channels:
         result = await check_membership(bot, ch["chat_id"], user_id)
         if result is False:
-            # Not a member - but did they send a join request?
             if has_pending_request(ch["chat_id"], user_id):
                 continue
             missing.append(ch)
@@ -484,13 +492,12 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     logger.info(f"Join request recorded: user {req.from_user.id} -> chat {chat_id}")
 
 
-async def send_force_join_prompt(context, user_id, missing, giveaway_id=None, query=None):
-    """giveaway_id here is the start payload (a giveaway id OR a 'v_<gid>_<uid>' vote payload)."""
+async def send_force_join_prompt(context, user_id, missing, payload=None, query=None):
     keyboard = []
     for ch in missing:
         keyboard.append([premium_button(f"JOIN {ch.get('title', 'CHANNEL')[:28]}", url=ch["link"],
                                         emoji_id=EMOJI_CHANNEL, style=BUTTON_STYLE_SUCCESS)])
-    verify_cb = f"verify_fsub_{giveaway_id}" if giveaway_id else "verify_fsub"
+    verify_cb = f"verify_fsub_{payload}" if payload else "verify_fsub"
     keyboard.append([premium_button("I'VE JOINED - VERIFY", callback_data=verify_cb,
                                     emoji_id=EMOJI_CONFIRM, style=BUTTON_STYLE_PRIMARY)])
 
@@ -514,7 +521,7 @@ async def send_force_join_prompt(context, user_id, missing, giveaway_id=None, qu
     await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=markup)
 
 
-async def force_join_gate(update, context, giveaway_id=None):
+async def force_join_gate(update, context, payload=None):
     """For messages/commands. Returns True when the user is blocked."""
     user = update.effective_user
     if not user or is_owner(user.id) or not required_channels:
@@ -522,7 +529,7 @@ async def force_join_gate(update, context, giveaway_id=None):
     missing = await get_missing_channels(context.bot, user.id)
     if not missing:
         return False
-    await send_force_join_prompt(context, user.id, missing, giveaway_id)
+    await send_force_join_prompt(context, user.id, missing, payload)
     return True
 
 
@@ -543,8 +550,8 @@ async def force_join_gate_callback(update, context):
 async def verify_fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
-    parts = query.data.split("_", 2)   # verify, fsub, [payload]
-    payload = parts[2] if len(parts) > 2 else None
+    prefix = "verify_fsub_"
+    payload = query.data[len(prefix):] if query.data.startswith(prefix) and len(query.data) > len(prefix) else None
 
     missing = await get_missing_channels(context.bot, user.id)
     if missing:
@@ -558,10 +565,8 @@ async def verify_fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    if payload and payload.startswith("v_"):
-        await handle_vote_link(update, context, payload)
-    elif payload:
-        await handle_giveaway_link(update, context, payload)
+    if payload:
+        await handle_payload(update, context, payload)
     else:
         await send_main_menu(context, user.id)
 
@@ -579,6 +584,8 @@ async def deduct_votes_of_voter(context, voter_id, only_channel_id=None):
             if voter_id in voters:
                 voters.discard(voter_id)
                 g["vote_counts"][target] = max(0, g["vote_counts"].get(target, 0) - 1)
+                g["vote_log"] = [e for e in g.get("vote_log", [])
+                                 if not (e.get("voter") == voter_id and e.get("target") == target)]
                 removed += 1
                 updates.append((gid, target, g["vote_counts"][target]))
 
@@ -660,15 +667,6 @@ async def send_main_menu(context, chat_id):
 
 
 # ================= START COMMAND =================
-def parse_vote_payload(payload):
-    """'v_<giveaway_id>_<user_id>' -> (giveaway_id, user_id) or None."""
-    try:
-        _, giveaway_id, target = payload.split("_")
-        return giveaway_id, int(target)
-    except Exception:
-        return None
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
@@ -697,16 +695,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     payload = context.args[0] if context.args else None
 
-    if payload and payload.startswith("v_"):
-        # Vote deep link coming from the channel's VOTE NOW button
-        parsed = parse_vote_payload(payload)
-        if not parsed or parsed[0] not in giveaways:
-            await update.message.reply_text(
-                f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>INVALID LINK</b>",
-                parse_mode="HTML"
-            )
-            return
-    elif payload and payload not in giveaways:
+    if payload:
+        if payload.startswith("v_"):
+            parts = payload.split("_")
+            if len(parts) != 3 or parts[1] not in giveaways:
+                payload = "INVALID"
+        elif payload not in giveaways:
+            payload = "INVALID"
+
+    if payload == "INVALID":
         await update.message.reply_text(
             f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>INVALID LINK</b>",
             parse_mode="HTML"
@@ -717,15 +714,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await force_join_gate(update, context, payload):
         return
 
-    if payload and payload.startswith("v_"):
-        await handle_vote_link(update, context, payload)
-        return
-
     if payload:
-        await handle_giveaway_link(update, context, payload)
+        await handle_payload(update, context, payload)
         return
 
     await update.message.reply_text(text=welcome_text(), parse_mode="HTML", reply_markup=main_keyboard())
+
+
+async def handle_payload(update: Update, context: ContextTypes.DEFAULT_TYPE, payload: str):
+    """Routes a /start payload: 'v_<gid>_<uid>' = vote link, '<gid>' = giveaway join link."""
+    if payload.startswith("v_"):
+        parts = payload.split("_")
+        try:
+            await handle_vote_link(update, context, parts[1], int(parts[2]))
+        except (IndexError, ValueError):
+            await context.bot.send_message(
+                chat_id=update.effective_user.id,
+                text=f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>INVALID LINK</b>",
+                parse_mode="HTML"
+            )
+    else:
+        await handle_giveaway_link(update, context, payload)
 
 
 async def get_giveaway_channel_link(context, giveaway):
@@ -744,10 +753,170 @@ async def get_giveaway_channel_link(context, giveaway):
     return fallback
 
 
+# ================= VOTING (DEEP LINK FLOW) =================
+async def cast_vote(context, user, giveaway_id, target_id):
+    """Core voting logic. Returns (ok, html_text)."""
+    g = giveaways.get(giveaway_id)
+    if not g or g.get("ended"):
+        return False, f"<tg-emoji emoji-id='{EMOJI_ENDED}'>❌</tg-emoji> <b>GIVEAWAY ENDED</b>"
+    if target_id not in g["users"]:
+        return False, f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>Participant not found!</b>"
+    if is_security_banned(user.id):
+        return False, "🚫 You are banned from this bot."
+    if user.id == target_id:
+        return False, f"<tg-emoji emoji-id='{EMOJI_ALERT}'>⚠️</tg-emoji> <b>You can't vote for yourself!</b>"
+
+    voted = g["voted_users"].setdefault(target_id, set())
+    if user.id in voted:
+        return False, (f"<tg-emoji emoji-id='{EMOJI_ALERT}'>⚠️</tg-emoji> <b>ALREADY VOTED!</b>\n\n"
+                       f"You have already voted for <b>{esc(g['users'][target_id])}</b>.")
+
+    suspicious, vote_count, target_count = register_vote_activity(user.id, target_id)
+    if suspicious:
+        suspicious_scores[user.id] += 1
+        if suspicious_scores[user.id] >= SUSPICIOUS_SCORE_LIMIT:
+            security_ban_user(user.id, "suspicious multi/fake voting activity")
+            await send_notification_to_owner(
+                context,
+                "🚨 SECURITY AUTO-BAN",
+                f"👤 {esc(user.full_name or 'Unknown')}\n🆔 <code>{user.id}</code>\n⚠️ Reason: suspicious voting ({vote_count} votes / {target_count} targets in {VOTE_WINDOW_SECONDS}s)"
+            )
+            return False, "🚫 Suspicious voting detected. You are banned."
+        return False, "⚠️ Voting too quickly. Please slow down."
+
+    voted.add(user.id)
+    g["vote_counts"][target_id] = g["vote_counts"].get(target_id, 0) + 1
+    new_votes = g["vote_counts"][target_id]
+    g.setdefault("vote_log", []).append({
+        "voter": user.id,
+        "voter_name": user.full_name or user.first_name or str(user.id),
+        "target": target_id,
+        "time": datetime.now().isoformat()
+    })
+    save_data()
+    update_user_stats(user.id, "vote")
+
+    await update_vote_button_in_channel(context, giveaway_id, target_id, new_votes)
+
+    return True, (
+        f"<tg-emoji emoji-id='{EMOJI_CELEBRATE}'>🎉</tg-emoji> <b>VOTE RECORDED!</b>\n\n"
+        f"<tg-emoji emoji-id='{EMOJI_SMILE}'>😎</tg-emoji> <b>You voted for:</b> {esc(g['users'][target_id])}\n"
+        f"<tg-emoji emoji-id='{EMOJI_CHART}'>📈</tg-emoji> <b>Current votes:</b> {new_votes}"
+    )
+
+
+def build_vote_join_prompt(giveaway_id, target_id, giveaway, link):
+    channel_display = esc(giveaway.get("channel_display", giveaway.get("channel", "Channel")))
+    target_name = esc(giveaway["users"].get(target_id, "Participant"))
+    keyboard = [
+        [premium_button("JOIN HOST CHANNEL", url=link, emoji_id=EMOJI_CHANNEL, style=BUTTON_STYLE_SUCCESS)],
+        [premium_button("VERIFY & VOTE", callback_data=f"vchk_{giveaway_id}_{target_id}",
+                        emoji_id=EMOJI_CONFIRM, style=BUTTON_STYLE_PRIMARY)]
+    ]
+    text = (
+        f"<tg-emoji emoji-id='{EMOJI_ALERT}'>⚠️</tg-emoji> <b>JOIN THE HOST CHANNEL TO VOTE</b>\n\n"
+        f"<tg-emoji emoji-id='{EMOJI_GIFT}'>🎁</tg-emoji> <b>Giveaway Host:</b> {channel_display}\n"
+        f"<tg-emoji emoji-id='{EMOJI_SMILE}'>😎</tg-emoji> <b>You are voting for:</b> {target_name}\n\n"
+        f"<b>1️⃣</b> Tap <b>JOIN HOST CHANNEL</b>\n"
+        f"<b>2️⃣</b> Tap <b>VERIFY & VOTE</b>"
+    )
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+async def handle_vote_link(update: Update, context: ContextTypes.DEFAULT_TYPE, giveaway_id: str, target_id: int):
+    """Step 2 (host channel) + Step 3 (vote) after mandatory channels were already checked."""
+    user = update.effective_user
+    g = giveaways.get(giveaway_id)
+
+    if not g:
+        await context.bot.send_message(chat_id=user.id,
+                                       text=f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>INVALID LINK</b>",
+                                       parse_mode="HTML")
+        return
+    if g.get("ended"):
+        await context.bot.send_message(chat_id=user.id,
+                                       text=f"<tg-emoji emoji-id='{EMOJI_ENDED}'>❌</tg-emoji> <b>GIVEAWAY ENDED</b>",
+                                       parse_mode="HTML")
+        return
+    if target_id not in g["users"]:
+        await context.bot.send_message(chat_id=user.id,
+                                       text=f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>Participant not found!</b>",
+                                       parse_mode="HTML")
+        return
+
+    is_member = (await check_membership(context.bot, g.get("channel_id"), user.id)) is True
+    if not is_member:
+        link = await get_giveaway_channel_link(context, g)
+        text, markup = build_vote_join_prompt(giveaway_id, target_id, g, link)
+        await context.bot.send_message(chat_id=user.id, text=text, parse_mode="HTML", reply_markup=markup)
+        return
+
+    ok, msg = await cast_vote(context, user, giveaway_id, target_id)
+    await context.bot.send_message(chat_id=user.id, text=msg, parse_mode="HTML")
+
+
+async def verify_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'VERIFY & VOTE' button after joining the host channel."""
+    query = update.callback_query
+    user = query.from_user
+    parts = query.data.split("_")   # vchk, gid, target
+    try:
+        giveaway_id = parts[1]
+        target_id = int(parts[2])
+    except (IndexError, ValueError):
+        await query.answer("❌ Invalid!", show_alert=True)
+        return
+
+    g = giveaways.get(giveaway_id)
+    if not g or g.get("ended"):
+        await query.answer("❌ Giveaway ended!", show_alert=True)
+        return
+
+    # Mandatory channels first (user may have left)
+    missing = await get_missing_channels(context.bot, user.id)
+    if missing:
+        await query.answer()
+        await send_force_join_prompt(context, user.id, missing, f"v_{giveaway_id}_{target_id}", query=query)
+        return
+
+    if (await check_membership(context.bot, g.get("channel_id"), user.id)) is not True:
+        await query.answer("❌ You haven't joined the host channel yet!", show_alert=True)
+        return
+
+    await query.answer()
+    ok, msg = await cast_vote(context, user, giveaway_id, target_id)
+    try:
+        await query.edit_message_text(msg, parse_mode="HTML")
+    except Exception:
+        await context.bot.send_message(chat_id=user.id, text=msg, parse_mode="HTML")
+
+
+async def vote_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'Votes: N' button in the channel - shows the current votes in a popup."""
+    query = update.callback_query
+    parts = query.data.split("_")   # vinfo, gid, uid
+    try:
+        giveaway_id = parts[1]
+        target_id = int(parts[2])
+        g = giveaways[giveaway_id]
+        votes = g["vote_counts"].get(target_id, 0)
+        name = g["users"].get(target_id, "Participant")
+        await query.answer(f"🗳 {name}\nCurrent votes: {votes}\n\nTap 'Vote Now' to vote!", show_alert=False)
+    except Exception:
+        await query.answer("Giveaway not found!", show_alert=True)
+
+
+async def legacy_vote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Old-style vote buttons from previous posts."""
+    await update.callback_query.answer("⚠️ Please use the 'Vote Now' button (opens the bot).", show_alert=True)
+
+
+# ================= JOIN GIVEAWAY LINK =================
 def build_join_giveaway(giveaway_id, giveaway, note):
     channel_display = esc(giveaway.get("channel_display", giveaway.get("channel", "Channel")))
+    btn_label = "REQUEST TO JOIN" if giveaway.get("mode") == "approve" else "JOIN GIVEAWAY"
     keyboard = [[
-        premium_button("JOIN GIVEAWAY", callback_data=f"join_{giveaway_id}", emoji_id=EMOJI_JOIN,
+        premium_button(btn_label, callback_data=f"join_{giveaway_id}", emoji_id=EMOJI_JOIN,
                        style=BUTTON_STYLE_SUCCESS)
     ]]
     text = (
@@ -759,25 +928,22 @@ def build_join_giveaway(giveaway_id, giveaway, note):
     return text, InlineKeyboardMarkup(keyboard)
 
 
-def build_membership_required(giveaway_id, giveaway, link, still=False, retry_cb=None, for_vote=False):
+def build_membership_required(giveaway_id, giveaway, link, still=False):
     channel_display = esc(giveaway.get("channel_display", giveaway.get("channel", "Channel")))
     title = "STILL NOT A MEMBER" if still else "CHANNEL MEMBERSHIP REQUIRED"
-    retry_cb = retry_cb or f"retry_join_{giveaway_id}"
-    action_word = "vote" if for_vote else "participate in this giveaway"
-    last_step = "verify membership and cast your vote" if for_vote else "verify membership"
     keyboard = [
         [premium_button("JOIN CHANNEL", url=link, emoji_id=EMOJI_CHANNEL, style=BUTTON_STYLE_SUCCESS)],
-        [premium_button("TRY AGAIN", callback_data=retry_cb, emoji_id=EMOJI_REFRESH,
+        [premium_button("TRY AGAIN", callback_data=f"retry_join_{giveaway_id}", emoji_id=EMOJI_REFRESH,
                         style=BUTTON_STYLE_PRIMARY)]
     ]
     text = (
         f"<tg-emoji emoji-id='{EMOJI_ALERT}'>⚠️</tg-emoji> <b>{title}</b>\n\n"
         f"<tg-emoji emoji-id='{EMOJI_GIFT}'>🎁</tg-emoji> <b>Giveaway Host:</b> {channel_display}\n\n"
-        f"<i>You need to join the host channel first to {action_word}!</i>\n\n"
+        f"<i>You need to join the channel first to participate in this giveaway!</i>\n\n"
         f"<b>Steps to join:</b>\n"
         f"1️⃣ Click <b>JOIN CHANNEL</b> below\n"
         f"2️⃣ Join the channel\n"
-        f"3️⃣ Click <b>TRY AGAIN</b> to {last_step}"
+        f"3️⃣ Click <b>TRY AGAIN</b> to verify membership"
     )
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -808,6 +974,24 @@ async def handle_giveaway_link(update: Update, context: ContextTypes.DEFAULT_TYP
             chat_id=user_id,
             text=f"<tg-emoji emoji-id='{EMOJI_STAR}'>🌟</tg-emoji> <b>ALREADY PARTICIPATED!</b>\n\n"
                  f"<tg-emoji emoji-id='{EMOJI_ID}'>💌</tg-emoji> <b>Your ID:</b> <code>{user_id}</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    if user_id in giveaway.get("pending", {}):
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"<tg-emoji emoji-id='{EMOJI_LIGHTNING}'>⏳</tg-emoji> <b>REQUEST PENDING</b>\n\n"
+                 f"<i>Your join request is waiting for the creator's approval.</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    if user_id in giveaway.get("rejected", []):
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>REQUEST REJECTED</b>\n\n"
+                 f"<i>The creator rejected your request for this giveaway.</i>",
             parse_mode="HTML"
         )
         return
@@ -853,190 +1037,6 @@ async def retry_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
-# ================= VOTE FLOW (CHANNEL -> BOT) =================
-async def cast_vote(context, user, giveaway_id, target_user_id):
-    """Runs after the mandatory-channel gate. Checks host channel, then records +1 vote.
-    Sends the result to the voter's private chat."""
-    voter_id = user.id
-
-    async def say(text, markup=None):
-        await context.bot.send_message(chat_id=voter_id, text=text, parse_mode="HTML", reply_markup=markup)
-
-    if is_security_banned(voter_id):
-        await say("🚫 You are banned from using this bot.")
-        return
-
-    save_user(user.id, user.username, user.first_name, user.last_name, source="vote")
-
-    giveaway = giveaways.get(giveaway_id)
-    if not giveaway:
-        await say(f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>INVALID LINK</b>")
-        return
-
-    if giveaway.get("ended"):
-        await say(f"<tg-emoji emoji-id='{EMOJI_ENDED}'>❌</tg-emoji> <b>GIVEAWAY ENDED</b>")
-        return
-
-    if target_user_id not in giveaway.get("users", {}):
-        await say(f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>Participant not found!</b>")
-        return
-
-    # Step 2: Host channel membership
-    member_ok = await check_membership(context.bot, giveaway['channel_id'], voter_id)
-    if member_ok is not True:
-        link = await get_giveaway_channel_link(context, giveaway)
-        text, markup = build_membership_required(
-            giveaway_id, giveaway, link,
-            retry_cb=f"retry_vote_{giveaway_id}_{target_user_id}", for_vote=True
-        )
-        await say(text, markup)
-        return
-
-    # Anti-abuse
-    suspicious, vote_count, target_count = register_vote_activity(voter_id, target_user_id)
-    if suspicious:
-        suspicious_scores[voter_id] += 1
-        if suspicious_scores[voter_id] >= SUSPICIOUS_SCORE_LIMIT:
-            security_ban_user(voter_id, "suspicious multi/fake voting activity")
-            await send_notification_to_owner(
-                context,
-                "🚨 SECURITY AUTO-BAN",
-                f"👤 {esc(user.full_name or 'Unknown')}\n🆔 <code>{voter_id}</code>\n⚠️ Reason: suspicious voting ({vote_count} votes / {target_count} targets in {VOTE_WINDOW_SECONDS}s)"
-            )
-            await say("🚫 Suspicious voting detected. You are banned.")
-            return
-        await say("⚠️ Voting too quickly. Please slow down.")
-        return
-
-    # Step 3: record the vote
-    if target_user_id not in giveaway["voted_users"]:
-        giveaway["voted_users"][target_user_id] = set()
-
-    target_name = esc(giveaway["users"].get(target_user_id, f"User {target_user_id}"))
-
-    if voter_id in giveaway["voted_users"][target_user_id]:
-        await say(
-            f"<tg-emoji emoji-id='{EMOJI_STAR}'>⚠️</tg-emoji> <b>ALREADY VOTED!</b>\n\n"
-            f"<tg-emoji emoji-id='{EMOJI_SMILE}'>😎</tg-emoji> You have already voted for <b>{target_name}</b>."
-        )
-        return
-
-    giveaway["voted_users"][target_user_id].add(voter_id)
-    giveaway['vote_counts'][target_user_id] = giveaway['vote_counts'].get(target_user_id, 0) + 1
-    new_votes = giveaway['vote_counts'][target_user_id]
-    save_data()
-    update_user_stats(voter_id, "vote")
-
-    await update_vote_button_in_channel(context, giveaway_id, target_user_id, new_votes)
-
-    channel_link = await get_giveaway_channel_link(context, giveaway)
-    await say(
-        f"<tg-emoji emoji-id='{EMOJI_CELEBRATE}'>🎉</tg-emoji> <b>VOTE RECORDED!</b>\n\n"
-        f"<tg-emoji emoji-id='{EMOJI_SMILE}'>😎</tg-emoji> <b>Voted for:</b> {target_name}\n"
-        f"<tg-emoji emoji-id='{EMOJI_CHART}'>📈</tg-emoji> <b>Total votes:</b> {new_votes}",
-        InlineKeyboardMarkup([[
-            premium_button("BACK TO CHANNEL", url=channel_link, emoji_id=EMOJI_CHANNEL, style=BUTTON_STYLE_PRIMARY)
-        ]])
-    )
-
-
-async def handle_vote_link(update: Update, context: ContextTypes.DEFAULT_TYPE, payload: str):
-    """Entry for 'v_<giveaway_id>_<user_id>' payloads (after mandatory channels are satisfied)."""
-    user = update.effective_user
-    parsed = parse_vote_payload(payload)
-    if not parsed or parsed[0] not in giveaways:
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>INVALID LINK</b>",
-            parse_mode="HTML"
-        )
-        return
-    await cast_vote(context, user, parsed[0], parsed[1])
-
-
-async def retry_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """TRY AGAIN pressed on the host-channel prompt of the vote flow."""
-    query = update.callback_query
-    user = query.from_user
-
-    try:
-        _, _, giveaway_id, target = query.data.split("_")
-        target_user_id = int(target)
-    except Exception:
-        await query.answer("❌ Invalid link!", show_alert=True)
-        return
-
-    giveaway = giveaways.get(giveaway_id)
-    if not giveaway:
-        await query.answer()
-        try:
-            await query.edit_message_text(
-                f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>Giveaway not found!</b>",
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
-        return
-
-    is_member = (await check_membership(context.bot, giveaway.get('channel_id'), user.id)) is True
-    if not is_member:
-        await query.answer("❌ You still haven't joined the channel!", show_alert=True)
-        link = await get_giveaway_channel_link(context, giveaway)
-        text, markup = build_membership_required(
-            giveaway_id, giveaway, link, still=True,
-            retry_cb=f"retry_vote_{giveaway_id}_{target_user_id}", for_vote=True
-        )
-        try:
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-        except Exception:
-            pass
-        return
-
-    await query.answer("✅ Verified!")
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
-    await cast_vote(context, user, giveaway_id, target_user_id)
-
-
-async def handle_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Button 1 under every participant: shows current votes in a popup."""
-    query = update.callback_query
-    try:
-        parts = query.data.split("_")
-        giveaway_id = parts[1]
-        target_user_id = int(parts[2])
-    except Exception:
-        await query.answer()
-        return
-
-    giveaway = giveaways.get(giveaway_id)
-    votes = giveaway["vote_counts"].get(target_user_id, 0) if giveaway else 0
-    await query.answer(f"🗳 Current votes: {votes}\n\nTap VOTE NOW to vote!", show_alert=False)
-
-
-async def handle_legacy_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Old single-button posts (callback 'vote_<gid>_<uid>'): upgrade them to the new 2-button layout."""
-    query = update.callback_query
-    try:
-        parts = query.data.split("_")
-        giveaway_id = parts[1]
-        target_user_id = int(parts[2])
-    except Exception:
-        await query.answer()
-        return
-
-    giveaway = giveaways.get(giveaway_id)
-    if giveaway:
-        votes = giveaway["vote_counts"].get(target_user_id, 0)
-        try:
-            await query.edit_message_reply_markup(reply_markup=vote_keyboard(giveaway_id, target_user_id, votes))
-        except Exception:
-            pass
-    await query.answer("👆 Tap the VOTE NOW button to vote through the bot.", show_alert=True)
-
-
 # ================= CREATE GIVEAWAY =================
 async def create_giveaway_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1068,7 +1068,6 @@ async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
 
     if user_id not in user_sessions or user_sessions[user_id].get("step") != "waiting_channel":
         return
@@ -1128,12 +1127,49 @@ async def process_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_sessions[user_id]
         return
 
+    await loading_msg.delete()
+
+    # Channel is OK -> ask for the giveaway mode (manual / approve)
+    user_sessions[user_id] = {"step": "choose_mode", "channel_info": channel_info}
+    keyboard = InlineKeyboardMarkup([
+        [premium_button("MANUAL", callback_data="gmode_manual", emoji_id=EMOJI_JOIN, style=BUTTON_STYLE_PRIMARY),
+         premium_button("APPROVE", callback_data="gmode_approve", emoji_id=EMOJI_CONFIRM, style=BUTTON_STYLE_SUCCESS)],
+        [premium_button("CANCEL", callback_data="cancel_creation", emoji_id=EMOJI_CANCEL, style=BUTTON_STYLE_DANGER)]
+    ])
+    await update.message.reply_text(
+        f"<b><tg-emoji emoji-id='{EMOJI_SETTINGS}'>⚙️</tg-emoji> CHOOSE GIVEAWAY MODE</b>\n\n"
+        f"<b><tg-emoji emoji-id='{EMOJI_SPEAKER}'>📢</tg-emoji> Channel:</b> {esc(channel_info['display_name'])}\n\n"
+        f"<b>MANUAL</b> - users join instantly when they tap JOIN.\n"
+        f"<b>APPROVE</b> - every join request comes to you; you <b>approve or reject</b> each user.",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+
+
+async def choose_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User picked MANUAL or APPROVE -> create the giveaway."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    user_name = query.from_user.first_name
+    mode = "approve" if query.data == "gmode_approve" else "manual"
+
+    session = user_sessions.get(user_id)
+    if not session or session.get("step") != "choose_mode":
+        await query.edit_message_text("❌ Session expired. Please start again.", parse_mode="HTML",
+                                      reply_markup=main_keyboard())
+        return
+
+    channel_info = session["channel_info"]
+    del user_sessions[user_id]
+
     giveaway_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
     link = f"https://t.me/{BOT_USERNAME}?start={giveaway_id}"
 
     giveaways[giveaway_id] = {
         "channel": channel_info["identifier"], "channel_display": channel_info["display_name"],
         "channel_id": channel_info["chat_id"], "users": {}, "vote_counts": {}, "voted_users": {}, "vote_msgs": {},
+        "mode": mode, "pending": {}, "rejected": [], "vote_log": [],
         "creator": user_id, "creator_name": user_name, "ended": False, "created_at": datetime.now().isoformat()
     }
 
@@ -1151,7 +1187,8 @@ async def process_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id != OWNER_ID:
         await send_notification_to_owner(context, "🔔 NEW GIVEAWAY CREATED!",
-                                         f"👤 {esc(user_name)}\n🆔 <code>{user_id}</code>\n📢 {esc(channel_info['display_name'])}\n🔗 <code>{link}</code>")
+                                         f"👤 {esc(user_name)}\n🆔 <code>{user_id}</code>\n📢 {esc(channel_info['display_name'])}\n"
+                                         f"⚙️ Mode: {mode.upper()}\n🔗 <code>{link}</code>")
 
     try:
         await context.bot.send_message(
@@ -1164,12 +1201,11 @@ async def process_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    await loading_msg.delete()
-
     success_text = (
         f"<b><tg-emoji emoji-id='{EMOJI_CLOWN}'>✅</tg-emoji> GIVEAWAY CREATED!</b>\n\n"
         f"<b><tg-emoji emoji-id='{EMOJI_SEARCH}'>🔍</tg-emoji> ID:</b> <code>{giveaway_id}</code>\n"
-        f"<b><tg-emoji emoji-id='{EMOJI_SPEAKER}'>📢</tg-emoji> Channel:</b> {esc(channel_info['display_name'])}\n\n"
+        f"<b><tg-emoji emoji-id='{EMOJI_SPEAKER}'>📢</tg-emoji> Channel:</b> {esc(channel_info['display_name'])}\n"
+        f"<b><tg-emoji emoji-id='{EMOJI_SETTINGS}'>⚙️</tg-emoji> Mode:</b> {mode.upper()}\n\n"
         f"<b><tg-emoji emoji-id='{EMOJI_LINK}'>🔗</tg-emoji> LINK:</b>\n<code>{link}</code>"
     )
 
@@ -1178,8 +1214,7 @@ async def process_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         premium_button("MAIN MENU", callback_data="main_menu", emoji_id=EMOJI_MAIN_MENU, style=BUTTON_STYLE_PRIMARY)
     ]]
 
-    await update.message.reply_text(success_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-    del user_sessions[user_id]
+    await query.edit_message_text(success_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 # ================= MANAGE =================
@@ -1218,7 +1253,8 @@ def manage_keyboard(giveaway_id, with_back=True):
             premium_button("REMOVE VOTES", callback_data=f"removevotes_{giveaway_id}", emoji_id=EMOJI_REMOVE_VOTES, style=BUTTON_STYLE_DANGER)
         ],
         [
-            premium_button("LEADERBOARD", callback_data=f"leaderboard_{giveaway_id}", emoji_id=EMOJI_LEADERBOARD, style=BUTTON_STYLE_PRIMARY)
+            premium_button("LEADERBOARD", callback_data=f"leaderboard_{giveaway_id}", emoji_id=EMOJI_LEADERBOARD, style=BUTTON_STYLE_PRIMARY),
+            premium_button("REAL VOTES", callback_data=f"realvotes_{giveaway_id}", emoji_id=EMOJI_SEARCH, style=BUTTON_STYLE_PRIMARY)
         ],
         [
             premium_button("END GIVEAWAY", callback_data=f"endgiveaway_{giveaway_id}", emoji_id=EMOJI_END_GIVEAWAY, style=BUTTON_STYLE_DANGER)
@@ -1244,10 +1280,110 @@ async def manage_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         text=f"<b><tg-emoji emoji-id='{EMOJI_ARROW}'>➡️</tg-emoji> MANAGEMENT PANEL</b>\n\n"
              f"<b>Status:</b> {status}\n"
+             f"<b>Mode:</b> {giveaway.get('mode', 'manual').upper()}\n"
              f"<b>Channel:</b> {esc(giveaway.get('channel_display', giveaway.get('channel')))}\n"
-             f"<b>Joined:</b> {len(giveaway.get('users', {}))}",
+             f"<b>Joined:</b> {len(giveaway.get('users', {}))}\n"
+             f"<b>Pending requests:</b> {len(giveaway.get('pending', {}))}",
         parse_mode="HTML",
         reply_markup=manage_keyboard(giveaway_id)
+    )
+
+
+# ================= REAL VOTES (WHO VOTED + TIME) =================
+def fmt_time(iso_str):
+    try:
+        return datetime.fromisoformat(iso_str).strftime("%d %b %Y, %I:%M %p")
+    except Exception:
+        return str(iso_str)
+
+
+async def real_votes_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manage -> REAL VOTES: all participants with their real (user-cast) votes."""
+    query = update.callback_query
+    giveaway_id = query.data.split("_")[1]
+    giveaway = giveaways.get(giveaway_id)
+    if not giveaway:
+        await query.answer("Not found!", show_alert=True)
+        return
+    if not is_manager(query.from_user.id, giveaway):
+        await query.answer("❌ Only the creator can see this!", show_alert=True)
+        return
+    await query.answer()
+
+    counts = defaultdict(int)
+    for e in giveaway.get("vote_log", []):
+        counts[e.get("target")] += 1
+
+    participants = sorted(giveaway["users"].items(), key=lambda kv: counts.get(kv[0], 0), reverse=True)[:50]
+
+    text = (
+        f"<b><tg-emoji emoji-id='{EMOJI_SEARCH}'>🔍</tg-emoji> REAL VOTES</b>\n\n"
+        f"<b>Participants:</b> {len(giveaway['users'])}\n"
+        f"<b>Total real votes:</b> {len(giveaway.get('vote_log', []))}\n\n"
+        f"<i>Tap a participant to see who voted for them and when.</i>"
+    )
+    if not participants:
+        text += "\n\n<i>No participants yet.</i>"
+
+    keyboard = []
+    for uid, name in participants:
+        keyboard.append([premium_button(f"{str(name)[:22]} — {counts.get(uid, 0)}",
+                                        callback_data=f"rvuser_{giveaway_id}_{uid}",
+                                        emoji_id=EMOJI_SMILE, style=BUTTON_STYLE_PRIMARY)])
+    keyboard.append([premium_button("BACK", callback_data=f"manage_{giveaway_id}", emoji_id=EMOJI_BACK, style=BUTTON_STYLE_PRIMARY)])
+
+    await query.edit_message_text(text=text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def real_votes_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows who voted for one participant and at what time."""
+    query = update.callback_query
+    parts = query.data.split("_")   # rvuser, gid, uid
+    try:
+        giveaway_id = parts[1]
+        target_id = int(parts[2])
+    except (IndexError, ValueError):
+        await query.answer("Invalid!", show_alert=True)
+        return
+    giveaway = giveaways.get(giveaway_id)
+    if not giveaway:
+        await query.answer("Not found!", show_alert=True)
+        return
+    if not is_manager(query.from_user.id, giveaway):
+        await query.answer("❌ Only the creator can see this!", show_alert=True)
+        return
+    await query.answer()
+
+    entries = [e for e in giveaway.get("vote_log", []) if e.get("target") == target_id]
+    name = giveaway["users"].get(target_id, f"User {target_id}")
+
+    text = (
+        f"<b><tg-emoji emoji-id='{EMOJI_SMILE}'>😎</tg-emoji> {esc(name)}</b>\n"
+        f"<b><tg-emoji emoji-id='{EMOJI_ID}'>💌</tg-emoji> ID:</b> <code>{target_id}</code>\n"
+        f"<b><tg-emoji emoji-id='{EMOJI_CHART}'>📈</tg-emoji> Real votes:</b> {len(entries)}\n"
+        f"<b>Total shown on post:</b> {giveaway['vote_counts'].get(target_id, 0)}\n\n"
+    )
+
+    if not entries:
+        text += "<i>No real votes yet.</i>"
+    else:
+        shown = 0
+        for i, e in enumerate(entries, 1):
+            uname = all_users.get(str(e.get("voter")), {}).get("username")
+            uname_txt = f" (@{esc(uname)})" if uname else ""
+            line = (f"<b>{i}.</b> {esc(e.get('voter_name', 'User'))}{uname_txt}\n"
+                    f"     🆔 <code>{e.get('voter')}</code>\n"
+                    f"     🕒 {esc(fmt_time(e.get('time')))}\n")
+            if len(text) + len(line) > 3800:
+                text += f"\n<i>...and {len(entries) - shown} more</i>"
+                break
+            text += line
+            shown += 1
+
+    await query.edit_message_text(
+        text=text, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[premium_button("BACK", callback_data=f"realvotes_{giveaway_id}",
+                                                           emoji_id=EMOJI_BACK, style=BUTTON_STYLE_PRIMARY)]])
     )
 
 
@@ -1405,7 +1541,35 @@ async def confirm_end_giveaway(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
-# ================= JOIN HANDLER (WITH CHANNEL CHECK) =================
+# ================= JOIN HANDLER (MANUAL / APPROVE) =================
+async def register_participant(context, giveaway_id, user_id, name):
+    """Adds the participant and posts their profile (with the 2 buttons) in the channel."""
+    giveaway = giveaways[giveaway_id]
+    giveaway["users"][user_id] = name
+    giveaway["vote_counts"][user_id] = 0
+    giveaway["voted_users"][user_id] = set()
+    save_data()
+
+    channel_text = (
+        f"<tg-emoji emoji-id='{EMOJI_SMILE}'>😎</tg-emoji> <b>Name:</b> {esc(name)}\n"
+        f"<tg-emoji emoji-id='{EMOJI_ID}'>💌</tg-emoji> <b>ID:</b> <code>{user_id}</code>"
+    )
+
+    try:
+        sent_msg = await context.bot.send_message(
+            chat_id=giveaway['channel_id'],
+            text=channel_text,
+            parse_mode="HTML",
+            reply_markup=participant_markup(giveaway_id, user_id, 0)
+        )
+        giveaway.setdefault("vote_msgs", {})[user_id] = sent_msg.message_id
+        save_data()
+        return True
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return False
+
+
 async def handle_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
 
@@ -1433,6 +1597,14 @@ async def handle_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⚠️ Already Joined!", show_alert=True)
         return
 
+    if user.id in giveaway.get("rejected", []):
+        await query.answer("❌ The creator rejected your request.", show_alert=True)
+        return
+
+    if user.id in giveaway.get("pending", {}):
+        await query.answer("⏳ Your request is already pending approval.", show_alert=True)
+        return
+
     # Double-check membership before allowing join
     is_member = (await check_membership(context.bot, giveaway.get('channel_id'), user.id)) is True
 
@@ -1446,38 +1618,122 @@ async def handle_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # User is a member - proceed with joining
-    giveaway["users"][user.id] = user.full_name or user.first_name
-    giveaway["vote_counts"][user.id] = 0
-    giveaway["voted_users"][user.id] = set()
-    save_data()
+    display_name = user.full_name or user.first_name
+
+    # ---------- APPROVE MODE: send request to the creator ----------
+    if giveaway.get("mode") == "approve" and user.id != giveaway.get("creator"):
+        giveaway.setdefault("pending", {})[user.id] = display_name
+        save_data()
+
+        await query.answer("📨 Request sent!", show_alert=True)
+
+        req_keyboard = InlineKeyboardMarkup([[
+            premium_button("APPROVE", callback_data=f"gapprove_{giveaway_id}_{user.id}",
+                           emoji_id=EMOJI_CONFIRM, style=BUTTON_STYLE_SUCCESS),
+            premium_button("REJECT", callback_data=f"greject_{giveaway_id}_{user.id}",
+                           emoji_id=EMOJI_CANCEL, style=BUTTON_STYLE_DANGER)
+        ]])
+        try:
+            await context.bot.send_message(
+                chat_id=giveaway["creator"],
+                text=f"<b><tg-emoji emoji-id='{EMOJI_INBOX}'>📥</tg-emoji> NEW JOIN REQUEST</b>\n\n"
+                     f"<tg-emoji emoji-id='{EMOJI_SMILE}'>😎</tg-emoji> <b>Name:</b> {esc(display_name)}\n"
+                     f"<tg-emoji emoji-id='{EMOJI_ID}'>💌</tg-emoji> <b>ID:</b> <code>{user.id}</code>\n"
+                     f"📝 <b>Username:</b> @{esc(user.username or 'no')}\n"
+                     f"<tg-emoji emoji-id='{EMOJI_SPEAKER}'>📢</tg-emoji> <b>Giveaway:</b> {esc(giveaway.get('channel_display'))}",
+                parse_mode="HTML",
+                reply_markup=req_keyboard
+            )
+        except Exception as e:
+            logger.error(f"Could not notify creator: {e}")
+
+        try:
+            await query.edit_message_text(
+                text=f"<tg-emoji emoji-id='{EMOJI_LIGHTNING}'>⏳</tg-emoji> <b>REQUEST SENT!</b>\n\n"
+                     f"<i>Waiting for the giveaway creator to approve you. You will be notified here.</i>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+        return
+
+    # ---------- MANUAL MODE: join instantly ----------
+    await register_participant(context, giveaway_id, user.id, display_name)
 
     await query.answer("✅ Registration Successful!", show_alert=True)
 
-    channel_text = (
-        f"<tg-emoji emoji-id='{EMOJI_SMILE}'>😎</tg-emoji> <b>Name:</b> {esc(user.full_name or user.first_name)}\n"
-        f"<tg-emoji emoji-id='{EMOJI_ID}'>💌</tg-emoji> <b>ID:</b> <code>{user.id}</code>"
-    )
-
-    try:
-        sent_msg = await context.bot.send_message(
-            chat_id=giveaway['channel_id'],
-            text=channel_text,
-            parse_mode="HTML",
-            reply_markup=vote_keyboard(giveaway_id, user.id, 0)
-        )
-        giveaway.setdefault("vote_msgs", {})[user.id] = sent_msg.message_id
-        save_data()
-    except Exception as e:
-        logger.error(f"Error: {e}")
-
     await query.edit_message_text(
         text=f"✅ <b>Registration Successful!</b>\n\n"
-             f"😎 {esc(user.full_name or user.first_name)}\n"
+             f"😎 {esc(display_name)}\n"
              f"💌 <code>{user.id}</code>\n\n"
              f"📥 Profile shared in channel!",
         parse_mode="HTML"
     )
+
+
+async def handle_approval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Creator pressed APPROVE / REJECT on a join request."""
+    query = update.callback_query
+    parts = query.data.split("_")   # gapprove|greject, gid, uid
+    approve = parts[0] == "gapprove"
+    try:
+        giveaway_id = parts[1]
+        target_id = int(parts[2])
+    except (IndexError, ValueError):
+        await query.answer("Invalid!", show_alert=True)
+        return
+
+    giveaway = giveaways.get(giveaway_id)
+    if not giveaway:
+        await query.answer("Giveaway not found!", show_alert=True)
+        return
+    if not is_manager(query.from_user.id, giveaway):
+        await query.answer("❌ Only the creator can do this!", show_alert=True)
+        return
+
+    pending = giveaway.get("pending", {})
+    if target_id not in pending:
+        await query.answer("Already handled.", show_alert=True)
+        try:
+            await query.edit_message_text("ℹ️ This request was already handled.", parse_mode="HTML")
+        except Exception:
+            pass
+        return
+
+    if giveaway.get("ended"):
+        await query.answer("❌ Giveaway already ended!", show_alert=True)
+        return
+
+    name = pending.pop(target_id)
+
+    if approve:
+        await register_participant(context, giveaway_id, target_id, name)
+        await query.answer("✅ Approved!")
+        result_text = (f"<tg-emoji emoji-id='{EMOJI_CONFIRM}'>✅</tg-emoji> <b>APPROVED</b>\n\n"
+                       f"{esc(name)} (<code>{target_id}</code>) is now a participant.")
+        user_text = (f"<tg-emoji emoji-id='{EMOJI_CELEBRATE}'>🎉</tg-emoji> <b>REQUEST APPROVED!</b>\n\n"
+                     f"You are now in the giveaway of <b>{esc(giveaway.get('channel_display'))}</b>.\n"
+                     f"📥 Your profile has been shared in the channel!")
+    else:
+        giveaway.setdefault("rejected", []).append(target_id)
+        save_data()
+        await query.answer("❌ Rejected!")
+        result_text = (f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>REJECTED</b>\n\n"
+                       f"{esc(name)} (<code>{target_id}</code>) was rejected.")
+        user_text = (f"<tg-emoji emoji-id='{EMOJI_ERROR}'>❌</tg-emoji> <b>REQUEST REJECTED</b>\n\n"
+                     f"The creator rejected your request for the giveaway of "
+                     f"<b>{esc(giveaway.get('channel_display'))}</b>.")
+
+    save_data()
+
+    try:
+        await query.edit_message_text(result_text, parse_mode="HTML")
+    except Exception:
+        pass
+    try:
+        await context.bot.send_message(chat_id=target_id, text=user_text, parse_mode="HTML")
+    except Exception:
+        pass
 
 
 # ================= BROADCAST ENGINE =================
@@ -1824,6 +2080,7 @@ async def g_management_command(update: Update, context: ContextTypes.DEFAULT_TYP
         text=f"<b><tg-emoji emoji-id='{EMOJI_ARROW}'>➡️</tg-emoji> MANAGEMENT PANEL (ADMIN)</b>\n\n"
              f"<b>Giveaway ID:</b> <code>{giveaway_id}</code>\n"
              f"<b>Status:</b> {status}\n"
+             f"<b>Mode:</b> {giveaway.get('mode', 'manual').upper()}\n"
              f"<b>Channel:</b> {esc(giveaway.get('channel_display', giveaway.get('channel')))}\n"
              f"<b>Creator:</b> {esc(giveaway.get('creator_name', 'Unknown'))}\n"
              f"<b>Joined:</b> {len(giveaway.get('users', {}))}\n"
@@ -2153,20 +2410,15 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================= BUTTON ROUTER =================
+# Buttons that handle the mandatory-channel check themselves (or are used from channels)
+GATE_EXEMPT_PREFIXES = ("vinfo_", "vote_", "vchk_", "verify_fsub", "gapprove_", "greject_")
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     user = query.from_user
     logger.info(f"Button: {data}")
-
-    # Channel buttons (vote count popup / legacy vote) are answered directly - they must never
-    # edit the channel message through the private-chat gates below.
-    if data.startswith("cnt_"):
-        await handle_count(update, context)
-        return
-    if data.startswith("vote_"):
-        await handle_legacy_vote(update, context)
-        return
 
     if SECURITY_ENABLED and user and user.id != OWNER_ID:
         if is_security_banned(user.id):
@@ -2190,8 +2442,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Mandatory channels gate (verify is handled by its own handler)
-    if not is_owner(user.id) and not data.startswith("verify_fsub"):
+    # Mandatory channels gate
+    if not is_owner(user.id) and not data.startswith(GATE_EXEMPT_PREFIXES):
         if await force_join_gate_callback(update, context):
             return
 
@@ -2205,159 +2457,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await create_giveaway_flow(update, context)
     elif data == "cancel_creation":
         await cancel_creation(update, context)
+    elif data.startswith("gmode_"):
+        await choose_mode_callback(update, context)
     elif data == "my_giveaways":
         await my_giveaways(update, context)
     elif data == "main_menu":
         await main_menu(update, context)
     elif data.startswith("retry_join_"):
         await retry_join(update, context)
-    elif data.startswith("retry_vote_"):
-        await retry_vote(update, context)
     elif data.startswith("manage_"):
         await manage_giveaway(update, context)
     elif data.startswith("addvotes_"):
-        await add_votes_flow(update, context)
-    elif data.startswith("removevotes_"):
-        await remove_votes_flow(update, context)
-    elif data.startswith("leaderboard_"):
-        await show_leaderboard(update, context)
-    elif data.startswith("endgiveaway_"):
-        await end_giveaway(update, context)
-    elif data.startswith("confirm_end_"):
-        await confirm_end_giveaway(update, context)
-    elif data.startswith("join_"):
-        await handle_join(update, context)
-
-
-async def security_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not SECURITY_ENABLED or not update.effective_user or not update.message:
-        return False
-
-    user = update.effective_user
-    user_id = user.id
-
-    if user_id == OWNER_ID:
-        return False
-
-    if is_security_banned(user_id):
-        try:
-            await update.message.reply_text("🚫 You are banned from using this bot.")
-        except Exception:
-            pass
-        return True
-
-    profile_found, profile_reason = check_profile_for_abuse(user)
-    if profile_found and AUTO_BAN_ON_PROFILE_ABUSE:
-        security_ban_user(user_id, profile_reason)
-        await send_notification_to_owner(
-            context,
-            "🚨 PROFILE SECURITY AUTO-BAN",
-            f"👤 {esc(user.full_name or 'Unknown')}\n"
-            f"🔹 Username: @{esc(user.username or 'N/A')}\n"
-            f"🆔 <code>{user_id}</code>\n"
-            f"⚠️ Reason: {profile_reason}"
-        )
-        await update.message.reply_text(
-            "🚫 Your name/username contains a banned word. You have been banned."
-        )
-        return True
-
-    text = update.message.text or ""
-    found, reason = contains_banned_content(text)
-    if found and AUTO_BAN_ON_ABUSE:
-        security_ban_user(user_id, reason)
-        await send_notification_to_owner(
-            context,
-            "🚨 SECURITY AUTO-BAN",
-            f"👤 {esc(user.full_name or 'Unknown')}\n"
-            f"🆔 <code>{user_id}</code>\n"
-            f"⚠️ Reason: {reason}"
-        )
-        await update.message.reply_text(
-            "🚫 Your message contained prohibited content. You have been banned from using this bot."
-        )
-        return True
-    return False
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await security_message_handler(update, context):
-        return
-
-    user_id = update.effective_user.id
-
-    # Mandatory channels gate
-    if await force_join_gate(update, context):
-        return
-
-    if user_id == OWNER_ID and admin_sessions.get(OWNER_ID, {}).get("step") == "waiting_broadcast":
-        await process_broadcast(update, context)
-        return
-
-    if user_id in user_sessions and user_sessions[user_id].get("step") == "waiting_channel":
-        await process_channel(update, context)
-        return
-
-    if "vote_giveaway" in context.user_data:
-        await process_vote_change(update, context)
-        return
-
-
-def main():
-    app = Application.builder().token(TOKEN).request(request).build()
-
-    # User commands
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("cancel", cancel_command))
-
-    # Admin commands
-    app.add_handler(CommandHandler("admin", admin_command))
-    app.add_handler(CommandHandler("broadcast", broadcast_command))
-    app.add_handler(CommandHandler("bc", bc_command))
-    app.add_handler(CommandHandler("ball", ball_command))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("users", users_command))
-    app.add_handler(CommandHandler("channels", channels_command))
-    app.add_handler(CommandHandler("backup", backup_command))
-    app.add_handler(CommandHandler("settings", settings_command))
-    app.add_handler(CommandHandler("security", security_command))
-    app.add_handler(CommandHandler("ban", ban_command))
-    app.add_handler(CommandHandler("unban", unban_command))
-    app.add_handler(CommandHandler("testnotify", testnotify_command))
-    app.add_handler(CommandHandler("clear", clear_command))
-    app.add_handler(CommandHandler("g_management", g_management_command))
-    app.add_handler(CommandHandler("add_vote", add_vote_command))
-    app.add_handler(CommandHandler("remove_vote", remove_vote_command))
-
-    # Mandatory join channels (owner)
-    app.add_handler(CommandHandler("addjoin", addjoin_command))
-    app.add_handler(CommandHandler("removejoin", removejoin_command))
-    app.add_handler(CommandHandler("joinlist", joinlist_command))
-
-    # Detect users leaving channels -> deduct votes
-    app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
-
-    # Detect join requests sent to mandatory channels (request-to-join links)
-    app.add_handler(ChatJoinRequestHandler(join_request_handler))
-
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("=" * 60)
-    print(f"🤖 {BOT_NAME} VOTE BOT IS ACTIVE!")
-    print(f"📌 Bot Username: @{BOT_USERNAME}")
-    print(f"👑 Owner ID: {OWNER_ID}")
-    print(f"💾 Data File: {DATA_FILE}")
-    print(f"🔒 Mandatory channels: {len(required_channels)}")
-    print("=" * 60)
-    print("\n✅ ADMIN COMMANDS: send /admin in the bot")
-    print("   /broadcast - menu (Users / Channels)")
-    print("   /addjoin, /removejoin, /joinlist - mandatory channels")
-    print("=" * 60)
-
-    # chat_member: see users leaving channels | chat_join_request: see join requests
-    app.run_polling(allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
-
-
-if __name__ == "__main__":
-    main()
+     
