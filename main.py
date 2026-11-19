@@ -2416,9 +2416,9 @@ GATE_EXEMPT_PREFIXES = ("vinfo_", "vote_", "vchk_", "verify_fsub", "gapprove_", 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    data = query.data
+    data = query.data or ""
     user = query.from_user
-    logger.info(f"Button: {data}")
+    logger.info("Button: %s", data)
 
     if SECURITY_ENABLED and user and user.id != OWNER_ID:
         if is_security_banned(user.id):
@@ -2431,9 +2431,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_notification_to_owner(
                 context,
                 "🚨 PROFILE SECURITY AUTO-BAN",
-                f"👤 {esc(user.full_name or 'Unknown')}\n"
-                f"🔹 Username: @{esc(user.username or 'N/A')}\n"
-                f"🆔 <code>{user.id}</code>\n"
+                f"👤 {esc(user.full_name or 'Unknown')}\\n"
+                f"🔹 Username: @{esc(user.username or 'N/A')}\\n"
+                f"🆔 <code>{user.id}</code>\\n"
                 f"⚠️ Reason: {profile_reason}"
             )
             await query.answer(
@@ -2442,11 +2442,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Mandatory channels gate
-    if not is_owner(user.id) and not data.startswith(GATE_EXEMPT_PREFIXES):
+    # Mandatory-channel check. These callbacks handle their own checks or
+    # originate from channel posts, so they are exempt.
+    if (
+        user
+        and not is_owner(user.id)
+        and not data.startswith(GATE_EXEMPT_PREFIXES)
+    ):
         if await force_join_gate_callback(update, context):
             return
 
+    # Dispatch callbacks without a long elif chain. This also avoids the
+    # malformed/empty elif block reported by the hosting log.
     if data.startswith("verify_fsub"):
         await verify_fsub(update, context)
     elif data.startswith("bcast_"):
@@ -2468,4 +2475,160 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("manage_"):
         await manage_giveaway(update, context)
     elif data.startswith("addvotes_"):
-     
+        await add_votes_flow(update, context)
+    elif data.startswith("removevotes_"):
+        await remove_votes_flow(update, context)
+    elif data.startswith("leaderboard_"):
+        await show_leaderboard(update, context)
+    elif data.startswith("realvotes_"):
+        await real_votes_list(update, context)
+    elif data.startswith("rvuser_"):
+        await real_votes_user(update, context)
+    elif data.startswith("endgiveaway_"):
+        await end_giveaway(update, context)
+    elif data.startswith("confirm_end_"):
+        await confirm_end_giveaway(update, context)
+    elif data.startswith("join_"):
+        await handle_join(update, context)
+    elif data.startswith(("gapprove_", "greject_")):
+        await handle_approval(update, context)
+    elif data.startswith("vinfo_"):
+        await vote_info_callback(update, context)
+    elif data.startswith("vchk_"):
+        await verify_vote_callback(update, context)
+    elif data.startswith("vote_"):
+        await legacy_vote_callback(update, context)
+
+
+async def security_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not SECURITY_ENABLED or not update.effective_user or not update.message:
+        return False
+
+    user = update.effective_user
+    user_id = user.id
+
+    if user_id == OWNER_ID:
+        return False
+
+    if is_security_banned(user_id):
+        try:
+            await update.message.reply_text("🚫 You are banned from using this bot.")
+        except Exception:
+            pass
+        return True
+
+    profile_found, profile_reason = check_profile_for_abuse(user)
+    if profile_found and AUTO_BAN_ON_PROFILE_ABUSE:
+        security_ban_user(user_id, profile_reason)
+        await send_notification_to_owner(
+            context,
+            "🚨 PROFILE SECURITY AUTO-BAN",
+            f"👤 {esc(user.full_name or 'Unknown')}\n"
+            f"🔹 Username: @{esc(user.username or 'N/A')}\n"
+            f"🆔 <code>{user_id}</code>\n"
+            f"⚠️ Reason: {profile_reason}"
+        )
+        await update.message.reply_text(
+            "🚫 Your name/username contains a banned word. You have been banned."
+        )
+        return True
+
+    text = update.message.text or ""
+    found, reason = contains_banned_content(text)
+    if found and AUTO_BAN_ON_ABUSE:
+        security_ban_user(user_id, reason)
+        await send_notification_to_owner(
+            context,
+            "🚨 SECURITY AUTO-BAN",
+            f"👤 {esc(user.full_name or 'Unknown')}\n"
+            f"🆔 <code>{user_id}</code>\n"
+            f"⚠️ Reason: {reason}"
+        )
+        await update.message.reply_text(
+            "🚫 Your message contained prohibited content. You have been banned from using this bot."
+        )
+        return True
+    return False
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await security_message_handler(update, context):
+        return
+
+    user_id = update.effective_user.id
+
+    # Mandatory channels gate
+    if await force_join_gate(update, context):
+        return
+
+    if user_id == OWNER_ID and admin_sessions.get(OWNER_ID, {}).get("step") == "waiting_broadcast":
+        await process_broadcast(update, context)
+        return
+
+    if user_id in user_sessions and user_sessions[user_id].get("step") == "waiting_channel":
+        await process_channel(update, context)
+        return
+
+    if "vote_giveaway" in context.user_data:
+        await process_vote_change(update, context)
+        return
+
+
+def main():
+    app = Application.builder().token(TOKEN).request(request).build()
+
+    # User commands
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel_command))
+
+    # Admin commands
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler("bc", bc_command))
+    app.add_handler(CommandHandler("ball", ball_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("users", users_command))
+    app.add_handler(CommandHandler("channels", channels_command))
+    app.add_handler(CommandHandler("backup", backup_command))
+    app.add_handler(CommandHandler("settings", settings_command))
+    app.add_handler(CommandHandler("security", security_command))
+    app.add_handler(CommandHandler("ban", ban_command))
+    app.add_handler(CommandHandler("unban", unban_command))
+    app.add_handler(CommandHandler("testnotify", testnotify_command))
+    app.add_handler(CommandHandler("clear", clear_command))
+    app.add_handler(CommandHandler("g_management", g_management_command))
+    app.add_handler(CommandHandler("add_vote", add_vote_command))
+    app.add_handler(CommandHandler("remove_vote", remove_vote_command))
+
+    # Mandatory join channels (owner)
+    app.add_handler(CommandHandler("addjoin", addjoin_command))
+    app.add_handler(CommandHandler("removejoin", removejoin_command))
+    app.add_handler(CommandHandler("joinlist", joinlist_command))
+
+    # Detect users leaving channels -> deduct votes
+    app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
+
+    # Detect join requests sent to mandatory channels (request-to-join links)
+    app.add_handler(ChatJoinRequestHandler(join_request_handler))
+
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    print("=" * 60)
+    print(f"🤖 {BOT_NAME} VOTE BOT IS ACTIVE!")
+    print(f"📌 Bot Username: @{BOT_USERNAME}")
+    print(f"👑 Owner ID: {OWNER_ID}")
+    print(f"💾 Data File: {DATA_FILE}")
+    print(f"🔒 Mandatory channels: {len(required_channels)}")
+    print("=" * 60)
+    print("\n✅ ADMIN COMMANDS: send /admin in the bot")
+    print("   /broadcast - menu (Users / Channels)")
+    print("   /addjoin, /removejoin, /joinlist - mandatory channels")
+    print("=" * 60)
+
+    # chat_member: see users leaving channels | chat_join_request: see join requests
+    app.run_polling(allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
+
+
+if __name__ == "__main__":
+    main()
