@@ -813,22 +813,33 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ================= MAIN MENU HELPERS =================
 def main_keyboard():
+    """Compact, mobile-friendly home screen keyboard."""
     return InlineKeyboardMarkup([
-        [premium_button("CONNECT", url=f"https://t.me/{BOT_USERNAME}?startchannel=true&admin=post_messages",
+        [premium_button("➕ ADD TO CHANNEL", url=f"https://t.me/{BOT_USERNAME}?startchannel=true&admin=post_messages",
                         emoji_id=EMOJI_CONNECT, style=BUTTON_STYLE_SUCCESS)],
-        [premium_button("CREATE", callback_data="create_giveaway", emoji_id=EMOJI_CREATE, style=BUTTON_STYLE_PRIMARY),
-         premium_button("MANAGE", callback_data="my_giveaways", emoji_id=EMOJI_MANAGE, style=BUTTON_STYLE_PRIMARY)]
+        [premium_button("🎁 CREATE GIVEAWAY", callback_data="create_giveaway",
+                        emoji_id=EMOJI_CREATE, style=BUTTON_STYLE_PRIMARY)],
+        [premium_button("🛠 MY GIVEAWAYS", callback_data="my_giveaways",
+                        emoji_id=EMOJI_MANAGE, style=BUTTON_STYLE_PRIMARY)]
     ])
 
 
 def welcome_text():
+    """Polished welcome screen; keep Telegram HTML tags balanced."""
     return (
-        f"<b><tg-emoji emoji-id='{EMOJI_WELCOME}'>🙂</tg-emoji> WELCOME TO {BOT_NAME} GIVEAWAY BOT</b>\n\n"
-        f"<i><tg-emoji emoji-id='{EMOJI_FIRE}'>☄️</tg-emoji> Create Powerful Vote Giveaways</i>\n"
-        f"<i><tg-emoji emoji-id='{EMOJI_ARROW}'>🔜</tg-emoji> Real Time Vote System</i>\n"
-        f"<i><tg-emoji emoji-id='{EMOJI_CHART}'>📈</tg-emoji> Advanced Management Tools</i>\n"
-        f"<i><tg-emoji emoji-id='{EMOJI_HEART}'>❤️‍🔥</tg-emoji> Leaderboard & Analytics</i>\n\n"
-        f"<b><tg-emoji emoji-id='{EMOJI_ROCKET}'>🚀</tg-emoji> START CREATING NOW!</b>"
+        f"<b>━━━━━━━━━━━━━━━━━━━━</b>\n"
+        f"<b><tg-emoji emoji-id='{EMOJI_WELCOME}'>🎉</tg-emoji> {esc(BOT_NAME)} VOTE BOT</b>\n"
+        f"<i>Your all-in-one giveaway and voting manager</i>\n"
+        f"<b>━━━━━━━━━━━━━━━━━━━━</b>\n\n"
+        f"<tg-emoji emoji-id='{EMOJI_FIRE}'>🔥</tg-emoji> <b>CREATE</b> — Launch a giveaway in your channel\n"
+        f"<tg-emoji emoji-id='{EMOJI_VOTE}'>🗳</tg-emoji> <b>VOTE</b> — Let your community vote easily\n"
+        f"<tg-emoji emoji-id='{EMOJI_CHART}'>📊</tg-emoji> <b>TRACK</b> — View votes and leaderboards\n"
+        f"<tg-emoji emoji-id='{EMOJI_SETTINGS}'>⚙️</tg-emoji> <b>MANAGE</b> — Control participants and results\n\n"
+        f"<b>GET STARTED</b>\n"
+        f"1. Add the bot to your channel as an admin.\n"
+        f"2. Tap <b>CREATE GIVEAWAY</b> and follow the steps.\n"
+        f"3. Share your giveaway link with your community.\n\n"
+        f"<i>Choose an action below to continue.</i>"
     )
 
 
@@ -2423,7 +2434,7 @@ async def addjoin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if any(c["chat_id"] == chat.id for c in required_channels):
-        await update.message.reply_text("⚠️ This channel is already in the mandatory list.")
+        await update.message.reply_text("⚠️ This channel is already in the mandatory list.", quote=True)
         return
 
     link = custom_link
@@ -2980,7 +2991,7 @@ async def emojitest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(text="<b>🌐 MAIN MENU</b>", parse_mode="HTML", reply_markup=main_keyboard())
+    await query.edit_message_text(text=welcome_text(), parse_mode="HTML", reply_markup=main_keyboard())
 
 
 # ================= BUTTON ROUTER =================
@@ -3083,23 +3094,4 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def security_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not SECURITY_ENABLED or not update.effective_user or not update.message:
-        return False
-
-    user = update.effective_user
-    user_id = user.id
-
-    if user_id == OWNER_ID:
-        return False
-
-    if is_security_banned(user_id):
-        try:
-            await update.message.reply_text("🚫 You are banned from using this bot.")
-        except Exception:
-            pass
-        return True
-
-    profile_found, profile_reason = check_profile_for_abuse(user)
-    if profile_found and AUTO_BAN_ON_PROFILE_ABUSE:
-        security_ban_user(user_id, profile_reason)
-        await send_no
+    if not S
