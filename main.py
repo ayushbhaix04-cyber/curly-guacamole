@@ -2423,4 +2423,683 @@ async def addjoin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if any(c["chat_id"] == chat.id for c in required_channels):
-        await update.message.reply_text("⚠️ This channel is already in the mandator
+        await update.message.reply_text("⚠️ This channel is already in the mandatory list.")
+        return
+
+    link = custom_link
+    if not link:
+        if chat.username:
+            link = f"https://t.me/{chat.username}"
+        elif chat.invite_link:
+            link = chat.invite_link
+        else:
+            try:
+                link = await context.bot.export_chat_invite_link(chat.id)
+            except Exception:
+                link = None
+    if not link:
+        await update.message.reply_text("❌ Could not create an invite link. Use: /addjoin <id> <invite_link>")
+        return
+
+    required_channels.append({
+        "chat_id": chat.id,
+        "identifier": ident,
+        "title": chat.title or ident,
+        "link": link,
+        "added_at": datetime.now().isoformat()
+    })
+    save_data()
+
+    await update.message.reply_text(
+        f"✅ <b>Mandatory channel added!</b>\n\n📢 {esc(chat.title or ident)}\n🆔 <code>{chat.id}</code>\n🔗 {esc(link)}\n\n"
+        f"<b>Total:</b> <code>{len(required_channels)}</code>",
+        parse_mode="HTML", disable_web_page_preview=True
+    )
+
+
+async def removejoin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/removejoin <@username | -100id>"""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /removejoin <@username or -100id>")
+        return
+
+    ident = context.args[0].lower()
+    for ch in list(required_channels):
+        if str(ch["chat_id"]) == ident or str(ch.get("identifier", "")).lower() == ident:
+            required_channels.remove(ch)
+            join_requests.pop(str(ch["chat_id"]), None)
+            save_data()
+            await update.message.reply_text(f"✅ Removed: {esc(ch.get('title'))}", parse_mode="HTML")
+            return
+    await update.message.reply_text("❌ That channel is not in the mandatory list. Use /joinlist.")
+
+
+async def joinlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+    if not required_channels:
+        await update.message.reply_text("ℹ️ No mandatory channels yet. Add one with /addjoin")
+        return
+    text = "<b>🔒 MANDATORY JOIN CHANNELS</b>\n\n"
+    for i, ch in enumerate(required_channels, 1):
+        text += f"<b>{i}.</b> {esc(ch.get('title'))}\n   🆔 <code>{ch['chat_id']}</code>\n   🔗 {esc(ch.get('link'))}\n\n"
+    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+
+
+# ---------- Broadcast ----------
+async def bc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/bc {msg} - Send message to ALL channels"""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /bc <message>")
+        return
+
+    msg = ' '.join(context.args)
+    await update.message.reply_text(f"🚀 <b>Sending to all channels...</b>\n\nTotal channels: <code>{len(get_all_channel_ids())}</code>", parse_mode="HTML")
+    context.application.create_task(run_broadcast(context, update.effective_chat.id, "channels", msg))
+
+
+async def ball_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/ball {msg} - Send message to all users AND all channels"""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /ball <message>")
+        return
+
+    msg = ' '.join(context.args)
+    await update.message.reply_text("🚀 <b>Sending to ALL USERS + ALL CHANNELS...</b>", parse_mode="HTML")
+    context.application.create_task(run_broadcast(context, update.effective_chat.id, "all", msg))
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/broadcast -> menu with 2 types (users / channels). /broadcast <msg> -> quick send to users."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    if context.args:
+        msg = ' '.join(context.args)
+        await update.message.reply_text(
+            f"🚀 <b>Broadcast started!</b>\n\nTotal users: <code>{len(all_users)}</code>\nThis may take some time...",
+            parse_mode="HTML")
+        context.application.create_task(run_broadcast(context, update.effective_chat.id, "users", msg))
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [premium_button("ALL USERS", callback_data="bcast_users", emoji_id=EMOJI_USERS, style=BUTTON_STYLE_PRIMARY)],
+        [premium_button("ALL CHANNELS", callback_data="bcast_channels", emoji_id=EMOJI_CHANNEL, style=BUTTON_STYLE_PRIMARY)],
+        [premium_button("CANCEL", callback_data="bcast_cancel", emoji_id=EMOJI_CANCEL, style=BUTTON_STYLE_DANGER)]
+    ])
+    await update.message.reply_text(
+        f"<b><tg-emoji emoji-id='{EMOJI_BROADCAST}'>📢</tg-emoji> BROADCAST SYSTEM</b>\n\n"
+        f"Choose who receives your message:\n\n"
+        f"👥 <b>All Users:</b> <code>{len(all_users)}</code>\n"
+        f"📺 <b>All Channels:</b> <code>{len(get_all_channel_ids())}</code>",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+
+
+async def broadcast_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_owner(query.from_user.id):
+        await query.answer("❌ You are not the owner!", show_alert=True)
+        return
+    await query.answer()
+
+    if query.data == "bcast_cancel":
+        admin_sessions.pop(OWNER_ID, None)
+        await query.edit_message_text("❌ Broadcast cancelled!")
+        return
+
+    target = "users" if query.data == "bcast_users" else "channels"
+    admin_sessions[OWNER_ID] = {"step": "waiting_broadcast", "target": target}
+    label = "ALL USERS" if target == "users" else "ALL CHANNELS"
+
+    await query.edit_message_text(
+        f"<b>📢 BROADCAST → {label}</b>\n\n"
+        "Send your message now.\n\n"
+        "<b>Supported HTML Tags:</b>\n"
+        "<code>&lt;b&gt;bold&lt;/b&gt;</code>\n"
+        "<code>&lt;i&gt;italic&lt;/i&gt;</code>\n"
+        "<code>&lt;u&gt;underline&lt;/u&gt;</code>\n"
+        "<code>&lt;s&gt;strikethrough&lt;/s&gt;</code>\n"
+        "<code>&lt;a href='URL'&gt;link&lt;/a&gt;</code>\n"
+        "<code>&lt;tg-emoji emoji-id='ID'&gt;🎁&lt;/tg-emoji&gt;</code>\n\n"
+        "Send /cancel to abort.",
+        parse_mode="HTML"
+    )
+
+
+async def process_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    session = admin_sessions.get(OWNER_ID, {})
+    if user_id != OWNER_ID or session.get("step") != "waiting_broadcast":
+        return
+
+    target = session.get("target", "users")
+    msg = update.message.text
+    del admin_sessions[OWNER_ID]
+
+    total = len(all_users) if target == "users" else len(get_all_channel_ids())
+    await update.message.reply_text(
+        f"🚀 <b>Broadcast started!</b>\n\nTarget: <b>{target.upper()}</b>\nTotal: <code>{total}</code>\nThis may take some time...",
+        parse_mode="HTML"
+    )
+    context.application.create_task(run_broadcast(context, update.effective_chat.id, target, msg))
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cancelled = False
+    if is_owner(user_id) and admin_sessions.pop(OWNER_ID, None):
+        cancelled = True
+    if user_sessions.pop(user_id, None):
+        cancelled = True
+    if context.user_data.pop("vote_giveaway", None):
+        context.user_data.pop("vote_action", None)
+        cancelled = True
+    await update.message.reply_text("❌ Cancelled!" if cancelled else "Nothing to cancel.")
+
+
+# ---------- Other admin commands ----------
+async def g_management_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/g_management {giveaway_id} - Open management panel for any giveaway (owner only)"""
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /g_management <giveaway_id>")
+        return
+
+    giveaway_id = context.args[0]
+    if giveaway_id not in giveaways:
+        await update.message.reply_text(f"❌ Giveaway '{giveaway_id}' not found!")
+        return
+
+    giveaway = giveaways[giveaway_id]
+    status = "🟢 ACTIVE" if not giveaway.get("ended") else "🔴 ENDED"
+
+    await update.message.reply_text(
+        text=f"<b><tg-emoji emoji-id='{EMOJI_ARROW}'>➡️</tg-emoji> MANAGEMENT PANEL (ADMIN)</b>\n\n"
+             f"<b>Giveaway ID:</b> <code>{giveaway_id}</code>\n"
+             f"<b>Status:</b> {status}\n"
+             f"<b>Mode:</b> {giveaway.get('mode', 'manual').upper()}\n"
+             f"<b>Force Join:</b> {esc((giveaway.get('extra_channel') or {}).get('title', 'None'))}\n"
+             f"<b>Channel:</b> {esc(giveaway.get('channel_display', giveaway.get('channel')))}\n"
+             f"<b>Creator:</b> {esc(giveaway.get('creator_name', 'Unknown'))}\n"
+             f"<b>Joined:</b> {len(giveaway.get('users', {}))}\n"
+             f"<b>Total Votes:</b> {sum(giveaway.get('vote_counts', {}).values())}",
+        parse_mode="HTML",
+        reply_markup=manage_keyboard(giveaway_id, with_back=False)
+    )
+
+
+async def _change_votes_command(update, context, sign):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    name = "add_vote" if sign > 0 else "remove_vote"
+    if len(context.args) != 3:
+        await update.message.reply_text(f"❌ Usage: /{name} <giveaway_id> <user_id> <votes>")
+        return
+
+    giveaway_id = context.args[0]
+    try:
+        target_uid = int(context.args[1])
+        votes = int(context.args[2])
+    except ValueError:
+        await update.message.reply_text("❌ user_id and votes must be numbers.")
+        return
+
+    if giveaway_id not in giveaways:
+        await update.message.reply_text(f"❌ Giveaway '{giveaway_id}' not found!")
+        return
+
+    giveaway = giveaways[giveaway_id]
+    if target_uid not in giveaway['users']:
+        await update.message.reply_text(f"❌ User {target_uid} not found in this giveaway!")
+        return
+
+    old_votes = giveaway['vote_counts'].get(target_uid, 0)
+    giveaway['vote_counts'][target_uid] = max(0, old_votes + sign * votes)
+    new_votes = giveaway['vote_counts'][target_uid]
+    save_data()
+
+    await update_vote_button_in_channel(context, giveaway_id, target_uid, new_votes)
+
+    title = "Votes Added!" if sign > 0 else "Votes Removed!"
+    change = f"Added:</b> +{votes}" if sign > 0 else f"Removed:</b> -{votes}"
+    await update.message.reply_text(
+        f"✅ <b>{title}</b>\n\n"
+        f"<b>Giveaway:</b> <code>{giveaway_id}</code>\n"
+        f"<b>User:</b> <code>{target_uid}</code> ({esc(giveaway['users'][target_uid])})\n"
+        f"<b>{change} votes\n"
+        f"<b>New Total:</b> {new_votes} votes",
+        parse_mode="HTML"
+    )
+
+
+async def add_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/add_vote {giveaway_id} {user_id} {votes}"""
+    await _change_votes_command(update, context, +1)
+
+
+async def remove_vote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/remove_vote {giveaway_id} {user_id} {votes}"""
+    await _change_votes_command(update, context, -1)
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    active = sum(1 for g in giveaways.values() if not g.get("ended", False))
+    participants = sum(len(g.get("users", {})) for g in giveaways.values())
+    votes = sum(sum(g.get("vote_counts", {}).values()) for g in giveaways.values())
+
+    text = (
+        f"<b><tg-emoji emoji-id='{EMOJI_STATS}'>📊</tg-emoji> BOT STATISTICS</b>\n\n"
+        f"<b>👥 Users:</b> <code>{len(all_users)}</code>\n"
+        f"<b>🎁 Giveaways:</b> <code>{len(giveaways)}</code>\n"
+        f"<b>🟢 Active:</b> <code>{active}</code>\n"
+        f"<b>📺 Channels:</b> <code>{len(channel_history)}</code>\n"
+        f"<b>🔒 Mandatory Channels:</b> <code>{len(required_channels)}</code>\n"
+        f"<b>👤 Participants:</b> <code>{participants}</code>\n"
+        f"<b>🗳️ Votes:</b> <code>{votes}</code>"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    users_list = list(all_users.values())[-15:]
+    users_list.reverse()
+    text = f"<b><tg-emoji emoji-id='{EMOJI_USERS}'>👥</tg-emoji> RECENT USERS</b>\n\n"
+    for u in users_list:
+        text += (f"<b>👤 {esc(u.get('first_name', 'Unknown'))}</b>\n   🆔 <code>{u.get('user_id')}</code>\n"
+                 f"   📝 @{esc(u.get('username') or 'no')}\n   📍 {esc(u.get('source', '?'))}\n\n")
+    text += f"\n<b>Total Users:</b> <code>{len(all_users)}</code>"
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    text = f"<b><tg-emoji emoji-id='{EMOJI_CHANNEL}'>📺</tg-emoji> CHANNEL GIVEAWAY HISTORY</b>\n\n"
+
+    text += "<b>🟢 ACTIVE GIVEAWAYS</b>\n"
+    text += "<code>─────────────────</code>\n"
+    active_found = False
+
+    for ch_key, ch_data in channel_history.items():
+        active_giveaways = [g for g in ch_data.get("giveaways", []) if g.get("status") == "active"]
+        if active_giveaways:
+            active_found = True
+            text += f"\n<b>📢 {esc(ch_data.get('channel_display', 'Unknown'))}</b>\n"
+            text += f"   🔍 Type: <code>{ch_data.get('type', 'unknown').upper()}</code>\n"
+            text += f"   🆔 ID: <code>{ch_data.get('channel_id', 'N/A')}</code>\n"
+            text += f"   👤 Owner: {esc(ch_data.get('created_by_name', 'Unknown'))}\n"
+            for g in active_giveaways:
+                text += f"      • ID: <code>{g.get('giveaway_id', 'N/A')}</code>\n"
+                text += f"        📅 Created: {g.get('created_at', '')[:10]}\n"
+
+    if not active_found:
+        text += "<i>No active giveaways</i>\n"
+
+    text += "\n<b>🔴 GIVEAWAY HISTORY</b>\n"
+    text += "<code>─────────────────</code>\n"
+    ended_found = False
+
+    for ch_key, ch_data in list(channel_history.items())[-10:]:
+        ended_giveaways = [g for g in ch_data.get("giveaways", []) if g.get("status") == "ended"]
+        if ended_giveaways:
+            ended_found = True
+            text += f"\n<b>📢 {esc(ch_data.get('channel_display', 'Unknown'))}</b>\n"
+            text += f"   🔍 Type: <code>{ch_data.get('type', 'unknown').upper()}</code>\n"
+            text += f"   🆔 ID: <code>{ch_data.get('channel_id', 'N/A')}</code>\n"
+            text += f"   👤 Owner: {esc(ch_data.get('created_by_name', 'Unknown'))}\n"
+            text += f"   🎁 Total: <code>{ch_data.get('total_giveaways', 0)}</code> giveaways\n"
+
+    if not ended_found:
+        text += "<i>No giveaway history yet</i>\n"
+
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    save_data()
+    await update.message.reply_text(
+        f"<b>✅ BACKUP CREATED!</b>\n\n"
+        f"<b>💾 File:</b> <code>{DATA_FILE}</code>\n"
+        f"<b>👥 Users:</b> <code>{len(all_users)}</code>\n"
+        f"<b>🎁 Giveaways:</b> <code>{len(giveaways)}</code>\n"
+        f"<b>📺 Channels:</b> <code>{len(channel_history)}</code>\n"
+        f"<b>🔒 Mandatory:</b> <code>{len(required_channels)}</code>\n\n"
+        "<i>Data is automatically saved on every change.</i>",
+        parse_mode="HTML"
+    )
+
+
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    await update.message.reply_text(
+        f"<b><tg-emoji emoji-id='{EMOJI_SETTINGS}'>⚙️</tg-emoji> SETTINGS</b>\n\n"
+        f"<b>Bot:</b> {BOT_NAME} BOT\n"
+        f"<b>Bot Username:</b> @{BOT_USERNAME}\n"
+        f"<b>Owner ID:</b> <code>{OWNER_ID}</code>\n"
+        f"<b>Data File:</b> <code>{DATA_FILE}</code>\n"
+        f"<b>Auto Save:</b> ✅ Enabled\n"
+        f"<b>User Tracking:</b> ✅ Enabled\n"
+        f"<b>Channel History:</b> ✅ Enabled\n"
+        f"<b>Auto Vote Update:</b> ✅ Enabled\n"
+        f"<b>Mandatory Join:</b> ✅ {len(required_channels)} channel(s)\n"
+        f"<b>Leave = Votes Deducted:</b> ✅ Enabled\n\n"
+        "<i>Settings are managed via bot configuration.</i>",
+        parse_mode="HTML"
+    )
+
+
+async def testnotify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    await send_notification_to_owner(context, "🔔 TEST NOTIFICATION", "This is a test notification from your bot!\n\nAll systems working fine.")
+    await update.message.reply_text("✅ Test notification sent to owner!", parse_mode="HTML")
+
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ CONFIRM CLEAR", callback_data="confirm_clear", style=BUTTON_STYLE_DANGER),
+        InlineKeyboardButton("❌ CANCEL", callback_data="main_menu", style=BUTTON_STYLE_PRIMARY)
+    ]])
+
+    await update.message.reply_text(
+        f"<b><tg-emoji emoji-id='{EMOJI_ALERT}'>⚠️</tg-emoji> DANGER ZONE</b>\n\n"
+        f"Are you sure you want to clear ALL data?\n\n"
+        f"This will delete:\n"
+        f"• <code>{len(all_users)}</code> users\n"
+        f"• <code>{len(giveaways)}</code> giveaways\n"
+        f"• <code>{len(channel_history)}</code> channel histories\n\n"
+        f"<i>Mandatory join channels are kept.</i>\n"
+        f"<b>This action cannot be undone!</b>",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+
+
+async def confirm_clear_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    if not is_owner(user_id):
+        await query.edit_message_text("❌ You are not the owner!", parse_mode="HTML")
+        return
+
+    global giveaways, all_users, channel_history
+    giveaways = {}
+    all_users = {}
+    channel_history = {}
+    banned_users.clear()
+    suspicious_scores.clear()
+    vote_activity.clear()
+    save_data()
+
+    await query.edit_message_text(
+        "✅ <b>All data cleared successfully!</b>\n\nBot data has been reset.",
+        parse_mode="HTML"
+    )
+
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only manual security ban."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /ban <user_id> [reason]")
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID.")
+        return
+
+    reason = " ".join(context.args[1:]).strip() or "manual owner ban"
+    security_ban_user(target_id, reason)
+    await update.message.reply_text(
+        f"🚫 <b>User banned.</b>\n\n🆔 <code>{target_id}</code>\n⚠️ {esc(reason)}",
+        parse_mode="HTML"
+    )
+
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only manual security unban."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /unban <user_id>")
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID.")
+        return
+
+    banned_users.discard(target_id)
+    if str(target_id) in all_users:
+        all_users[str(target_id)]["security_banned"] = False
+        all_users[str(target_id)]["security_unbanned_at"] = datetime.now().isoformat()
+    save_data()
+
+    await update.message.reply_text(
+        f"✅ <b>User unbanned.</b>\n\n🆔 <code>{target_id}</code>",
+        parse_mode="HTML"
+    )
+
+
+async def security_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+    active_bans = len(banned_users)
+    suspicious = sum(suspicious_scores.values())
+    await update.message.reply_text(
+        f"<b>🛡 SECURITY STATUS</b>\n\n"
+        f"<b>Auto-ban:</b> {'ON' if AUTO_BAN_ON_ABUSE else 'OFF'}\n"
+        f"<b>Banned users:</b> <code>{active_bans}</code>\n"
+        f"<b>Suspicious score:</b> <code>{suspicious}</code>\n"
+        f"<b>Vote window:</b> <code>{VOTE_WINDOW_SECONDS}s</code>\n"
+        f"<b>Max votes/window:</b> <code>{MAX_VOTES_IN_WINDOW}</code>",
+        parse_mode="HTML"
+    )
+
+
+# ================= MAIN MENU =================
+async def emojitest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/emojitest - owner only. Sends one premium emoji message + button to check if they render."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ You are not the owner!")
+        return
+    import telegram
+    me = await context.bot.get_me()
+    kb = InlineKeyboardMarkup([[premium_button("PREMIUM EMOJI BUTTON", callback_data="main_menu",
+                                               emoji_id=EMOJI_VOTE, style=BUTTON_STYLE_SUCCESS)]])
+    await update.message.reply_text(
+        f"<tg-emoji emoji-id='{EMOJI_VOTE}'>🗳</tg-emoji> <b>PREMIUM EMOJI TEST</b>\n\n"
+        f"Bot: @{esc(me.username)}\n"
+        f"python-telegram-bot: <code>{esc(getattr(telegram, '__version__', '?'))}</code> (needs 22.7+)\n\n"
+        f"If the emoji at the start of this message and on the button below are <b>normal</b> emojis, "
+        f"Telegram is not allowing custom emojis for this bot (see reply notes).",
+        parse_mode="HTML", reply_markup=kb
+    )
+
+
+async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(text="<b>🌐 MAIN MENU</b>", parse_mode="HTML", reply_markup=main_keyboard())
+
+
+# ================= BUTTON ROUTER =================
+# Buttons that handle the mandatory-channel check themselves (or are used from channels)
+GATE_EXEMPT_PREFIXES = ("vinfo_", "vote_", "vchk_", "verify_fsub", "gapprove_", "greject_")
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data or ""
+    user = query.from_user
+    logger.info("Button: %s", data)
+
+    if SECURITY_ENABLED and user and user.id != OWNER_ID:
+        if is_security_banned(user.id):
+            await query.answer("🚫 You are banned from this bot.", show_alert=True)
+            return
+
+        profile_found, profile_reason = check_profile_for_abuse(user)
+        if profile_found and AUTO_BAN_ON_PROFILE_ABUSE:
+            security_ban_user(user.id, profile_reason)
+            await send_notification_to_owner(
+                context,
+                "🚨 PROFILE SECURITY AUTO-BAN",
+                f"👤 {esc(user.full_name or 'Unknown')}\\n"
+                f"🔹 Username: @{esc(user.username or 'N/A')}\\n"
+                f"🆔 <code>{user.id}</code>\\n"
+                f"⚠️ Reason: {profile_reason}"
+            )
+            await query.answer(
+                "🚫 Your name/username contains a banned word. You are banned.",
+                show_alert=True
+            )
+            return
+
+    # Mandatory-channel check. These callbacks handle their own checks or
+    # originate from channel posts, so they are exempt.
+    if (
+        user
+        and not is_owner(user.id)
+        and not data.startswith(GATE_EXEMPT_PREFIXES)
+    ):
+        if await force_join_gate_callback(update, context):
+            return
+
+    # Dispatch callbacks without a long elif chain. This also avoids the
+    # malformed/empty elif block reported by the hosting log.
+    if data.startswith("verify_fsub"):
+        await verify_fsub(update, context)
+    elif data.startswith("bcast_"):
+        await broadcast_menu_callback(update, context)
+    elif data == "confirm_clear":
+        await confirm_clear_callback(update, context)
+    elif data == "create_giveaway":
+        await create_giveaway_flow(update, context)
+    elif data == "cancel_creation":
+        await cancel_creation(update, context)
+    elif data.startswith("plist_"):
+        await participants_list(update, context)
+    elif data.startswith("pinfo_"):
+        await participant_info(update, context)
+    elif data.startswith("pdq_"):
+        await participant_disqualify(update, context)
+    elif data == "gextra_skip":
+        await skip_extra_callback(update, context)
+    elif data.startswith("gmode_"):
+        await choose_mode_callback(update, context)
+    elif data == "my_giveaways":
+        await my_giveaways(update, context)
+    elif data == "main_menu":
+        await main_menu(update, context)
+    elif data.startswith("retry_join_"):
+        await retry_join(update, context)
+    elif data.startswith("manage_"):
+        await manage_giveaway(update, context)
+    elif data.startswith("addvotes_"):
+        await add_votes_flow(update, context)
+    elif data.startswith("removevotes_"):
+        await remove_votes_flow(update, context)
+    elif data.startswith("leaderboard_"):
+        await show_leaderboard(update, context)
+    elif data.startswith("realvotes_"):
+        await real_votes_list(update, context)
+    elif data.startswith("rvuser_"):
+        await real_votes_user(update, context)
+    elif data.startswith("endgiveaway_"):
+        await end_giveaway(update, context)
+    elif data.startswith("confirm_end_"):
+        await confirm_end_giveaway(update, context)
+    elif data.startswith("join_"):
+        await handle_join(update, context)
+    elif data.startswith(("gapprove_", "greject_")):
+        await handle_approval(update, context)
+    elif data.startswith("vinfo_"):
+        await vote_info_callback(update, context)
+    elif data.startswith("vchk_"):
+        await verify_vote_callback(update, context)
+    elif data.startswith("vote_"):
+        await legacy_vote_callback(update, context)
+
+
+async def security_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not SECURITY_ENABLED or not update.effective_user or not update.message:
+        return False
+
+    user = update.effective_user
+    user_id = user.id
+
+    if user_id == OWNER_ID:
+        return False
+
+    if is_security_banned(user_id):
+        try:
+            await update.message.reply_text("🚫 You are banned from using this bot.")
+        except Exception:
+            pass
+        return True
+
+    profile_found, profile_reason = check_profile_for_abuse(user)
+    if profile_found and AUTO_BAN_ON_PROFILE_ABUSE:
+        security_ban_user(user_id, profile_reason)
+        await send_no
