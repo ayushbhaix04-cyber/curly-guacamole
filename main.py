@@ -3094,4 +3094,5 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def security_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not S
+    if not SECURITY_ENABLED or not update.effective_user or not update.message:
+        return False
