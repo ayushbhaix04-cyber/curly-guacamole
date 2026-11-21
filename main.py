@@ -36,8 +36,8 @@ if not TOKEN:
     raise SystemExit("BOT_TOKEN environment variable is not set.")
 
 BOT_NAME = "ARJUN VOTE"
-BOT_USERNAME = os.getenv("BOT_USERNAME", "arjunvotebot")   # change to your new bot's username
-OWNER_ID = int(os.getenv("OWNER_ID", "8413435583"))
+BOT_USERNAME = os.getenv("BOT_USERNAME", "Brokenvotebot")   # change to your new bot's username
+OWNER_ID = int(os.getenv("OWNER_ID", "8703047687"))
 
 # ================= PREMIUM EMOJIS =================
 EMOJI_VOTE = "5267095979097610740"
@@ -341,7 +341,7 @@ def _build_lookup():
             strong[t] = cat
     for t, cat in exact.items():
         ct = _collapse(t)
-        if len(ct) >= 4:                 # avoid short collapsed words causing false positives
+        if len(ct) >= 5:                 # avoid short collapsed words causing false positives
             exact_c[ct] = cat
     return exact, exact_c, strong
 
@@ -360,17 +360,23 @@ def _clean_text(text):
 def _tokens(text):
     """Words of the text. 'f u c k' / 'f.u.c.k' are merged back into 'fuck'."""
     raw = re.sub(r"[^a-z0-9]+", " ", text).split()
-    merged, buf = [], ""
+    merged, buf = [], []
+
+    def flush():
+        # only runs of 4+ single letters are merged (f u c k); short runs are just initials (B C Roy)
+        if len(buf) >= 4:
+            merged.append("".join(buf))
+        else:
+            merged.extend(buf)
+        buf.clear()
+
     for tok in raw:
         if len(tok) == 1:
-            buf += tok
+            buf.append(tok)
         else:
-            if buf:
-                merged.append(buf)
-                buf = ""
+            flush()
             merged.append(tok)
-    if buf:
-        merged.append(buf)
+    flush()
     return merged
 
 
@@ -813,33 +819,22 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ================= MAIN MENU HELPERS =================
 def main_keyboard():
-    """Compact, mobile-friendly home screen keyboard."""
     return InlineKeyboardMarkup([
-        [premium_button("➕ ADD TO CHANNEL", url=f"https://t.me/{BOT_USERNAME}?startchannel=true&admin=post_messages",
+        [premium_button("CONNECT", url=f"https://t.me/{BOT_USERNAME}?startchannel=true&admin=post_messages",
                         emoji_id=EMOJI_CONNECT, style=BUTTON_STYLE_SUCCESS)],
-        [premium_button("🎁 CREATE GIVEAWAY", callback_data="create_giveaway",
-                        emoji_id=EMOJI_CREATE, style=BUTTON_STYLE_PRIMARY)],
-        [premium_button("🛠 MY GIVEAWAYS", callback_data="my_giveaways",
-                        emoji_id=EMOJI_MANAGE, style=BUTTON_STYLE_PRIMARY)]
+        [premium_button("CREATE", callback_data="create_giveaway", emoji_id=EMOJI_CREATE, style=BUTTON_STYLE_PRIMARY),
+         premium_button("MANAGE", callback_data="my_giveaways", emoji_id=EMOJI_MANAGE, style=BUTTON_STYLE_PRIMARY)]
     ])
 
 
 def welcome_text():
-    """Polished welcome screen; keep Telegram HTML tags balanced."""
     return (
-        f"<b>━━━━━━━━━━━━━━━━━━━━</b>\n"
-        f"<b><tg-emoji emoji-id='{EMOJI_WELCOME}'>🎉</tg-emoji> {esc(BOT_NAME)} VOTE BOT</b>\n"
-        f"<i>Your all-in-one giveaway and voting manager</i>\n"
-        f"<b>━━━━━━━━━━━━━━━━━━━━</b>\n\n"
-        f"<tg-emoji emoji-id='{EMOJI_FIRE}'>🔥</tg-emoji> <b>CREATE</b> — Launch a giveaway in your channel\n"
-        f"<tg-emoji emoji-id='{EMOJI_VOTE}'>🗳</tg-emoji> <b>VOTE</b> — Let your community vote easily\n"
-        f"<tg-emoji emoji-id='{EMOJI_CHART}'>📊</tg-emoji> <b>TRACK</b> — View votes and leaderboards\n"
-        f"<tg-emoji emoji-id='{EMOJI_SETTINGS}'>⚙️</tg-emoji> <b>MANAGE</b> — Control participants and results\n\n"
-        f"<b>GET STARTED</b>\n"
-        f"1. Add the bot to your channel as an admin.\n"
-        f"2. Tap <b>CREATE GIVEAWAY</b> and follow the steps.\n"
-        f"3. Share your giveaway link with your community.\n\n"
-        f"<i>Choose an action below to continue.</i>"
+        f"<b><tg-emoji emoji-id='{EMOJI_WELCOME}'>🙂</tg-emoji> WELCOME TO {BOT_NAME} GIVEAWAY BOT</b>\n\n"
+        f"<i><tg-emoji emoji-id='{EMOJI_FIRE}'>☄️</tg-emoji> Create Powerful Vote Giveaways</i>\n"
+        f"<i><tg-emoji emoji-id='{EMOJI_ARROW}'>🔜</tg-emoji> Real Time Vote System</i>\n"
+        f"<i><tg-emoji emoji-id='{EMOJI_CHART}'>📈</tg-emoji> Advanced Management Tools</i>\n"
+        f"<i><tg-emoji emoji-id='{EMOJI_HEART}'>❤️‍🔥</tg-emoji> Leaderboard & Analytics</i>\n\n"
+        f"<b><tg-emoji emoji-id='{EMOJI_ROCKET}'>🚀</tg-emoji> START CREATING NOW!</b>"
     )
 
 
@@ -2434,7 +2429,7 @@ async def addjoin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if any(c["chat_id"] == chat.id for c in required_channels):
-        await update.message.reply_text("⚠️ This channel is already in the mandatory list.", quote=True)
+        await update.message.reply_text("⚠️ This channel is already in the mandatory list.")
         return
 
     link = custom_link
@@ -2991,7 +2986,7 @@ async def emojitest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(text=welcome_text(), parse_mode="HTML", reply_markup=main_keyboard())
+    await query.edit_message_text(text="<b>🌐 MAIN MENU</b>", parse_mode="HTML", reply_markup=main_keyboard())
 
 
 # ================= BUTTON ROUTER =================
@@ -3096,3 +3091,154 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def security_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not SECURITY_ENABLED or not update.effective_user or not update.message:
         return False
+
+    user = update.effective_user
+    user_id = user.id
+
+    if user_id == OWNER_ID:
+        return False
+
+    if is_security_banned(user_id):
+        try:
+            await update.message.reply_text("🚫 You are banned from using this bot.")
+        except Exception:
+            pass
+        return True
+
+    profile_found, profile_reason = check_profile_for_abuse(user)
+    if profile_found and AUTO_BAN_ON_PROFILE_ABUSE:
+        security_ban_user(user_id, profile_reason)
+        await send_notification_to_owner(
+            context,
+            "🚨 PROFILE SECURITY AUTO-BAN",
+            f"👤 {esc(user.full_name or 'Unknown')}\n"
+            f"🔹 Username: @{esc(user.username or 'N/A')}\n"
+            f"🆔 <code>{user_id}</code>\n"
+            f"⚠️ Reason: {profile_reason}"
+        )
+        await update.message.reply_text(
+            "🚫 Your name/username contains a banned word. You have been banned."
+        )
+        return True
+
+    text = update.message.text or ""
+    found, reason = contains_banned_content(text)
+    if found and AUTO_BAN_ON_ABUSE:
+        security_ban_user(user_id, reason)
+        await send_notification_to_owner(
+            context,
+            "🚨 SECURITY AUTO-BAN",
+            f"👤 {esc(user.full_name or 'Unknown')}\n"
+            f"🆔 <code>{user_id}</code>\n"
+            f"⚠️ Reason: {reason}"
+        )
+        await update.message.reply_text(
+            "🚫 Your message contained prohibited content. You have been banned from using this bot."
+        )
+        return True
+    return False
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await security_message_handler(update, context):
+        return
+
+    user_id = update.effective_user.id
+
+    # Mandatory channels gate
+    if await force_join_gate(update, context):
+        return
+
+    if user_id == OWNER_ID and admin_sessions.get(OWNER_ID, {}).get("step") == "waiting_broadcast":
+        await process_broadcast(update, context)
+        return
+
+    if user_id in user_sessions and user_sessions[user_id].get("step") == "waiting_channel":
+        await process_channel(update, context)
+        return
+
+    if user_id in user_sessions and user_sessions[user_id].get("step") == "waiting_extra_channel":
+        await process_extra_channel(update, context)
+        return
+
+    if "vote_giveaway" in context.user_data:
+        await process_vote_change(update, context)
+        return
+
+
+async def error_handler(update, context):
+    """Logs every unhandled error with its traceback and answers the pressed button."""
+    err = context.error
+    if "message is not modified" in str(err).lower():
+        return
+    logger.error("Unhandled error while processing an update", exc_info=err)
+    try:
+        query = getattr(update, "callback_query", None)
+        if query is not None:
+            await query.answer("⚠️ Something went wrong. Please try again.", show_alert=True)
+    except Exception:
+        pass
+
+
+def main():
+    global BOT_REF
+    app = Application.builder().token(TOKEN).request(request).build()
+    BOT_REF = app.bot
+
+    # User commands
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel_command))
+
+    # Admin commands
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("emojitest", emojitest_command))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler("bc", bc_command))
+    app.add_handler(CommandHandler("ball", ball_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("users", users_command))
+    app.add_handler(CommandHandler("channels", channels_command))
+    app.add_handler(CommandHandler("backup", backup_command))
+    app.add_handler(CommandHandler("settings", settings_command))
+    app.add_handler(CommandHandler("security", security_command))
+    app.add_handler(CommandHandler("ban", ban_command))
+    app.add_handler(CommandHandler("unban", unban_command))
+    app.add_handler(CommandHandler("testnotify", testnotify_command))
+    app.add_handler(CommandHandler("clear", clear_command))
+    app.add_handler(CommandHandler("g_management", g_management_command))
+    app.add_handler(CommandHandler("add_vote", add_vote_command))
+    app.add_handler(CommandHandler("remove_vote", remove_vote_command))
+
+    # Mandatory join channels (owner)
+    app.add_handler(CommandHandler("addjoin", addjoin_command))
+    app.add_handler(CommandHandler("removejoin", removejoin_command))
+    app.add_handler(CommandHandler("joinlist", joinlist_command))
+
+    # Detect users leaving channels -> deduct votes
+    app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER))
+
+    # Detect join requests sent to mandatory channels (request-to-join links)
+    app.add_handler(ChatJoinRequestHandler(join_request_handler))
+
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(error_handler)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    print("=" * 60)
+    print(f"🤖 {BOT_NAME} VOTE BOT IS ACTIVE!")
+    print(f"📌 Bot Username: @{BOT_USERNAME}")
+    print(f"👑 Owner ID: {OWNER_ID}")
+    print(f"💾 Data File: {DATA_FILE}")
+    print(f"🔒 Mandatory channels: {len(required_channels)}")
+    print("=" * 60)
+    print("\n✅ ADMIN COMMANDS: send /admin in the bot")
+    print("   /broadcast - menu (Users / Channels)")
+    print("   /addjoin, /removejoin, /joinlist - mandatory channels")
+    print("=" * 60)
+
+    # chat_member: see users leaving channels | chat_join_request: see join requests
+    app.run_polling(allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"])
+
+
+if __name__ == "__main__":
+    main()
